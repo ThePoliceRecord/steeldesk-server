@@ -11,13 +11,14 @@ pub mod users;
 use axum::{
     extract::Extension,
     http::StatusCode,
-    routing::{delete, get, post, put},
+    routing::{delete, get, get_service, post, put},
     Json, Router,
 };
 use hbb_common::log;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::ServeDir;
 
 use crate::api::auth::{create_token, AuthUser};
 use crate::api::users::User;
@@ -301,6 +302,15 @@ pub async fn build_router(db: Database) -> Router {
         .route(
             "/api/control-roles/effective/:user_id",
             get(control_roles::get_effective_control_role),
+        )
+        // Web console static files
+        .nest(
+            "/console",
+            get_service(ServeDir::new("web-console")).handle_error(
+                |err: std::io::Error| async move {
+                    (StatusCode::INTERNAL_SERVER_ERROR, format!("IO error: {}", err))
+                },
+            ),
         )
         // Shared state
         .layer(Extension(db))

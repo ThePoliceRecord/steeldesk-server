@@ -1,0 +1,1051 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RustDesk Pro Console</title>
+<style>
+:root {
+  --bg: #0f1117;
+  --bg-card: #181b23;
+  --bg-input: #1e2230;
+  --bg-sidebar: #13151d;
+  --bg-hover: #252a37;
+  --border: #2a2e3b;
+  --text: #e0e1e6;
+  --text-dim: #8b8fa3;
+  --accent: #4f8ff7;
+  --accent-hover: #6ba0f9;
+  --danger: #e5484d;
+  --danger-hover: #f16b6e;
+  --success: #30a46c;
+  --warning: #f5a623;
+  --radius: 6px;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: var(--font); background: var(--bg); color: var(--text); min-height: 100vh; }
+a { color: var(--accent); text-decoration: none; }
+button { font-family: var(--font); cursor: pointer; border: none; border-radius: var(--radius); padding: 8px 16px; font-size: 13px; transition: background 0.15s; }
+input, select, textarea { font-family: var(--font); background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; font-size: 13px; outline: none; transition: border-color 0.15s; }
+input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; padding: 10px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); border-bottom: 1px solid var(--border); background: var(--bg-card); }
+td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
+tr:hover td { background: var(--bg-hover); }
+
+.layout { display: flex; min-height: 100vh; }
+.sidebar { width: 220px; background: var(--bg-sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; }
+.sidebar-header { padding: 20px 16px; border-bottom: 1px solid var(--border); }
+.sidebar-header h1 { font-size: 16px; font-weight: 600; }
+.sidebar-header .subtitle { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.nav-items { padding: 8px 0; flex: 1; }
+.nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 16px; font-size: 13px; color: var(--text-dim); cursor: pointer; transition: all 0.15s; border-left: 3px solid transparent; }
+.nav-item:hover { background: var(--bg-hover); color: var(--text); }
+.nav-item.active { color: var(--accent); background: rgba(79,143,247,0.08); border-left-color: var(--accent); }
+.nav-item .icon { width: 18px; text-align: center; font-size: 15px; }
+.nav-section { padding: 16px 16px 6px; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); }
+.sidebar-footer { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-dim); }
+.sidebar-footer .user-info { display: flex; align-items: center; gap: 8px; }
+.sidebar-footer .logout-btn { margin-top: 8px; font-size: 11px; color: var(--danger); cursor: pointer; }
+.sidebar-footer .logout-btn:hover { color: var(--danger-hover); }
+
+.main { flex: 1; overflow-y: auto; }
+.page-header { padding: 24px 32px 16px; }
+.page-header h2 { font-size: 20px; font-weight: 600; }
+.page-header p { color: var(--text-dim); font-size: 13px; margin-top: 4px; }
+.content { padding: 0 32px 32px; }
+
+.card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); }
+.card-header { padding: 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+.card-header h3 { font-size: 14px; font-weight: 600; }
+.card-body { padding: 16px; }
+
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.stat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+.stat-card .label { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+.stat-card .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+.stat-card .value.green { color: var(--success); }
+.stat-card .value.blue { color: var(--accent); }
+
+.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 12px; }
+.toolbar-left { display: flex; gap: 8px; align-items: center; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-danger:hover { background: var(--danger-hover); }
+.btn-ghost { background: transparent; color: var(--text-dim); border: 1px solid var(--border); }
+.btn-ghost:hover { background: var(--bg-hover); color: var(--text); }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.badge-admin { background: rgba(79,143,247,0.15); color: var(--accent); }
+.badge-enable { background: rgba(48,164,108,0.15); color: var(--success); }
+.badge-disable { background: rgba(229,72,77,0.15); color: var(--danger); }
+.badge-client { background: rgba(245,166,35,0.15); color: var(--warning); }
+
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; width: 480px; max-width: 90vw; max-height: 80vh; overflow-y: auto; }
+.modal-header { padding: 16px 20px; border-bottom: 1px solid var(--border); font-size: 15px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+.modal-header .close { cursor: pointer; color: var(--text-dim); font-size: 18px; }
+.modal-header .close:hover { color: var(--text); }
+.modal-body { padding: 20px; }
+.modal-footer { padding: 12px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
+
+.form-group { margin-bottom: 14px; }
+.form-group label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.3px; }
+.form-group input, .form-group select, .form-group textarea { width: 100%; }
+.form-group textarea { min-height: 80px; resize: vertical; }
+.form-check { display: flex; align-items: center; gap: 8px; }
+.form-check input[type="checkbox"] { width: auto; }
+
+.empty-state { text-align: center; padding: 40px 20px; color: var(--text-dim); }
+.empty-state .icon { font-size: 32px; margin-bottom: 8px; }
+.error-msg { color: var(--danger); font-size: 13px; margin-bottom: 8px; padding: 8px 12px; background: rgba(229,72,77,0.1); border-radius: var(--radius); }
+
+.login-wrapper { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+.login-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 40px; width: 380px; }
+.login-card h1 { font-size: 22px; margin-bottom: 4px; text-align: center; }
+.login-card .subtitle { color: var(--text-dim); font-size: 13px; text-align: center; margin-bottom: 28px; }
+.login-card button { width: 100%; padding: 10px; font-size: 14px; margin-top: 8px; }
+
+.filter-bar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.filter-bar input, .filter-bar select { width: auto; min-width: 180px; }
+.tag { display: inline-block; background: var(--bg-hover); padding: 2px 8px; border-radius: 10px; font-size: 11px; margin: 1px 2px; }
+
+.json-editor { font-family: var(--mono); font-size: 12px; min-height: 120px; }
+.scroll-table { overflow-x: auto; }
+.truncate { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="text/babel">
+// =========================================================================
+// API Client
+// =========================================================================
+const api = {
+  base: window.location.port === '21114' ? window.location.origin : (window.location.origin.replace(/:\d+$/, '') + ':21114'),
+  getToken() { return localStorage.getItem('rd_token'); },
+  setToken(t) { localStorage.setItem('rd_token', t); },
+  clearToken() { localStorage.removeItem('rd_token'); localStorage.removeItem('rd_user'); },
+  getUser() { try { return JSON.parse(localStorage.getItem('rd_user')); } catch { return null; } },
+  setUser(u) { localStorage.setItem('rd_user', JSON.stringify(u)); },
+
+  async request(method, path, body) {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = this.getToken();
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const opts = { method, headers };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    const res = await fetch(`${this.base}${path}`, opts);
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = text; }
+    if (!res.ok) {
+      const err = new Error(data?.error || `HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    return data;
+  },
+  get(p) { return this.request('GET', p); },
+  post(p, b) { return this.request('POST', p, b); },
+  put(p, b) { return this.request('PUT', p, b); },
+  del(p) { return this.request('DELETE', p); },
+};
+
+// =========================================================================
+// Shared Components
+// =========================================================================
+function Modal({ title, onClose, children, footer }) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <span>{title}</span>
+          <span className="close" onClick={onClose}>&times;</span>
+        </div>
+        <div className="modal-body">{children}</div>
+        {footer && <div className="modal-footer">{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+function ConfirmModal({ message, onConfirm, onCancel }) {
+  return (
+    <Modal title="Confirm" onClose={onCancel} footer={
+      <React.Fragment>
+        <button className="btn-ghost" onClick={onCancel}>Cancel</button>
+        <button className="btn-danger" onClick={onConfirm}>Delete</button>
+      </React.Fragment>
+    }>
+      <p>{message}</p>
+    </Modal>
+  );
+}
+
+function useApi(fetcher, deps = []) {
+  const [data, setData] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState(null);
+  const reload = React.useCallback(() => {
+    setLoading(true);
+    setError(null);
+    fetcher().then(d => { setData(d); setLoading(false); }).catch(e => { setError(e.message); setLoading(false); });
+  }, deps);
+  React.useEffect(reload, [reload]);
+  return { data, loading, error, reload, setData };
+}
+
+// =========================================================================
+// Login Page
+// =========================================================================
+function LoginPage({ onLogin }) {
+  const [username, setUsername] = React.useState('');
+  const [password, setPassword] = React.useState('');
+  const [error, setError] = React.useState('');
+  const [loading, setLoading] = React.useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      const res = await api.post('/api/login', { username, password });
+      api.setToken(res.access_token);
+      api.setUser(res.user);
+      onLogin(res.user);
+    } catch (err) {
+      setError(err.message || 'Login failed');
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div className="login-wrapper">
+      <form className="login-card" onSubmit={handleSubmit}>
+        <h1>RustDesk Pro</h1>
+        <div className="subtitle">Server Administration Console</div>
+        {error && <div className="error-msg">{error}</div>}
+        <div className="form-group">
+          <label>Username</label>
+          <input value={username} onChange={e => setUsername(e.target.value)} autoFocus placeholder="admin" />
+        </div>
+        <div className="form-group">
+          <label>Password</label>
+          <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="password" />
+        </div>
+        <button className="btn-primary" type="submit" disabled={loading}>{loading ? 'Signing in...' : 'Sign In'}</button>
+      </form>
+    </div>
+  );
+}
+
+// =========================================================================
+// Dashboard Page
+// =========================================================================
+function DashboardPage() {
+  const heartbeat = useApi(() => api.get('/api/heartbeat'));
+  const users = useApi(() => api.get('/api/users').catch(() => []));
+  const peers = useApi(() => api.get('/api/peers').catch(() => ({ total: 0 })));
+  const audit = useApi(() => api.get('/api/audit/conn').catch(() => []));
+
+  return (
+    <React.Fragment>
+      <div className="page-header"><h2>Dashboard</h2><p>Server overview and recent activity</p></div>
+      <div className="content">
+        <div className="stats-grid">
+          <div className="stat-card">
+            <div className="label">Server Status</div>
+            <div className={'value ' + (heartbeat.data?.is_pro ? 'green' : '')}>{heartbeat.loading ? '...' : heartbeat.data?.is_pro ? 'Online' : 'Error'}</div>
+          </div>
+          <div className="stat-card">
+            <div className="label">Users</div>
+            <div className="value blue">{users.loading ? '...' : Array.isArray(users.data) ? users.data.length : 0}</div>
+          </div>
+          <div className="stat-card">
+            <div className="label">Devices</div>
+            <div className="value blue">{peers.loading ? '...' : peers.data?.total ?? 0}</div>
+          </div>
+          <div className="stat-card">
+            <div className="label">Audit Entries</div>
+            <div className="value blue">{audit.loading ? '...' : Array.isArray(audit.data) ? audit.data.length : 0}</div>
+          </div>
+        </div>
+        <div className="card">
+          <div className="card-header"><h3>Recent Audit Log</h3></div>
+          <div className="scroll-table">
+            <table>
+              <thead><tr><th>ID</th><th>From</th><th>To</th><th>Type</th><th>Time</th><th>Note</th></tr></thead>
+              <tbody>
+                {audit.loading ? <tr><td colSpan="6">Loading...</td></tr> :
+                 !Array.isArray(audit.data) || audit.data.length === 0 ? <tr><td colSpan="6" style={{textAlign:'center',color:'var(--text-dim)'}}>No audit entries</td></tr> :
+                 audit.data.slice(-10).reverse().map(e => (
+                  <tr key={e.id}><td>{e.id}</td><td>{e.from_peer}</td><td>{e.to_peer}</td><td><span className={`badge badge-${e.conn_type === 'file_transfer' ? 'client' : 'enable'}`}>{e.conn_type}</span></td><td className="truncate">{e.timestamp}</td><td>{e.note || '-'}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </React.Fragment>
+  );
+}
+
+// =========================================================================
+// Users Page
+// =========================================================================
+function UsersPage() {
+  const { data: users, loading, error, reload } = useApi(() => api.get('/api/users'));
+  const [modal, setModal] = React.useState(null); // 'create' | {edit: user} | {del: user}
+  const [form, setForm] = React.useState({ username: '', email: '', password: '', is_admin: false });
+  const [formError, setFormError] = React.useState('');
+  const [saving, setSaving] = React.useState(false);
+
+  const openCreate = () => { setForm({ username: '', email: '', password: '', is_admin: false }); setFormError(''); setModal('create'); };
+  const openEdit = (u) => { setForm({ username: u.username, email: u.email, password: '', is_admin: u.is_admin }); setFormError(''); setModal({ edit: u }); };
+  const openDel = (u) => setModal({ del: u });
+
+  const handleSave = async () => {
+    setSaving(true); setFormError('');
+    try {
+      if (modal === 'create') {
+        await api.post('/api/users', form);
+      } else {
+        const body = { username: form.username, email: form.email, is_admin: form.is_admin };
+        if (form.password) body.password = form.password;
+        await api.put(`/api/users/${modal.edit.id}`, body);
+      }
+      setModal(null); reload();
+    } catch (e) { setFormError(e.message); }
+    setSaving(false);
+  };
+
+  const handleDelete = async () => {
+    try { await api.del(`/api/users/${modal.del.id}`); setModal(null); reload(); } catch (e) { alert(e.message); }
+  };
+
+  return (
+    <React.Fragment>
+      <div className="page-header"><h2>Users</h2><p>Manage user accounts</p></div>
+      <div className="content">
+        <div className="toolbar"><div /><button className="btn-primary" onClick={openCreate}>+ Create User</button></div>
+        {error && <div className="error-msg">{error}</div>}
+        <div className="card">
+          <div className="scroll-table">
+            <table>
+              <thead><tr><th>Username</th><th>Email</th><th>Role</th><th>ID</th><th>Actions</th></tr></thead>
+              <tbody>
+                {loading ? <tr><td colSpan="5">Loading...</td></tr> :
+                 (!users || users.length === 0) ? <tr><td colSpan="5" className="empty-state">No users found</td></tr> :
+                 users.map(u => (
+                  <tr key={u.id}>
+                    <td><strong>{u.username}</strong></td>
+                    <td>{u.email}</td>
+                    <td>{u.is_admin ? <span className="badge badge-admin">Admin</span> : <span className="badge" style={{background:'var(--bg-hover)',color:'var(--text-dim)'}}>User</span>}</td>
+                    <td className="truncate" style={{maxWidth:120,fontSize:11,color:'var(--text-dim)'}}>{u.id}</td>
+                    <td>
+                      <button className="btn-ghost btn-sm" onClick={() => openEdit(u)}>Edit</button>{' '}
+                      <button className="btn-danger btn-sm" onClick={() => openDel(u)}>Delete</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {(modal === 'create' || modal?.edit) && (
+          <Modal title={modal === 'create' ? 'Create User' : 'Edit User'} onClose={() => setModal(null)} footer={
+            <React.Fragment>
+              <button className="btn-ghost" onClick={() => setModal(null)}>Cancel</button>
+              <button className="btn-primary" onClick={handleSave} disabled={saving}>{saving ? 'Saving...' : 'Save'}</button>
+            </React.Fragment>
+          }>
+            {formError && <div className="error-msg">{formError}</div>}
+            <div className="form-group"><label>Username</label><input value={form.username} onChange={e => setForm({...form, username: e.target.value})} /></div>
+            <div className="form-group"><label>Email</label><input value={form.email} onChange={e => setForm({...form, email: e.target.value})} /></div>
+            <div className="form-group"><label>Password{modal?.edit ? ' (leave blank to keep)' : ''}</label><input type="password" value={form.password} onChange={e => setForm({...form, password: e.target.value})} /></div>
+            <div className="form-group form-check"><input type="checkbox" checked={form.is_admin} onChange={e => setForm({...form, is_admin: e.target.checked})} /><label style={{margin:0}}>Administrator</label></div>
+          </Modal>
+        )}
+        {modal?.del && <ConfirmModal message={`Delete user "${modal.del.username}"?`} onConfirm={handleDelete} onCancel={() => setModal(null)} />}
+      </div>
+    </React.Fragment>
+  );
+}
+
+// =========================================================================
+// Groups Page (User Groups + Device Groups)
+// =========================================================================
+function GroupsPage() {
+  const [tab, setTab] = React.useState('user');
+  const userGroups = useApi(() => api.get('/api/user-groups'));
+  const deviceGroups = useApi(() => api.get('/api/device-groups'));
+  const groups = tab === 'user' ? userGroups : deviceGroups;
+  const endpoint = tab === 'user' ? '/api/user-groups' : '/api/device-groups';
+
+  const [modal, setModal] = React.useState(null);
+  const [name, setName] = React.useState('');
+  const [formError, setFormError] = React.useState('');
+  const [members, setMembers] = React.useState(null); // { groupId, list }
+  const [memberId, setMemberId] = React.useState('');
+
+  const handleCreate = async () => {
+    setFormError('');
+    try { await api.post(endpoint, { name }); setModal(null); groups.reload(); } catch (e) { setFormError(e.message); }
+  };
+  const handleDelete = async (id) => {
+    if (!confirm('Delete this group?')) return;
+    try { await api.del(`${endpoint}/${id}`); groups.reload(); if (members?.groupId === id) setMembers(null); } catch (e) { alert(e.message); }
+  };
+  const loadMembers = async (id) => {
+    try { const list = await api.get(`${endpoint}/${id}/members`); setMembers({ groupId: id, list }); } catch (e) { alert(e.message); }
+  };
+  const addMember = async () => {
+    if (!memberId || !members) return;
+    try { await api.post(`${endpoint}/${members.groupId}/members`, { id: memberId }); setMemberId(''); loadMembers(members.groupId); } catch (e) { alert(e.message); }
+  };
+  const removeMember = async (mid) => {
+    if (!members) return;
+    try { await api.del(`${endpoint}/${members.groupId}/members/${mid}`); loadMembers(members.groupId); } catch (e) { alert(e.message); }
+  };
+
+  return (
+    <React.Fragment>
+      <div className="page-header"><h2>Groups</h2><p>Manage user and device groups</p></div>
+      <div className="content">
+        <div className="toolbar">
+          <div className="toolbar-left">
+            <button className={tab === 'user' ? 'btn-primary' : 'btn-ghost'} onClick={() => { setTab('user'); setMembers(null); }}>User Groups</button>
+            <button className={tab === 'device' ? 'btn-primary' : 'btn-ghost'} onClick={() => { setTab('device'); setMembers(null); }}>Device Groups</button>
+          </div>
+          <button className="btn-primary" onClick={() => { setName(''); setFormError(''); setModal('create'); }}>+ Create Group</button>
+        </div>
+        <div style={{display:'flex',gap:16}}>
+          <div className="card" style={{flex:1}}>
+            <div className="scroll-table">
+              <table>
+                <thead><tr><th>Name</th><th>ID</th><th>Created</th><th>Actions</th></tr></thead>
+                <tbody>
+                  {groups.loading ? <tr><td colSpan="4">Loading...</td></tr> :
+                   (!groups.data || groups.data.length === 0) ? <tr><td colSpan="4" className="empty-state">No groups</td></tr> :
+                   groups.data.map(g => (
+                    <tr key={g.id} style={members?.groupId === g.id ? {background:'var(--bg-hover)'} : {}}>
+                      <td><strong>{g.name}</strong></td>
+                      <td className="truncate" style={{maxWidth:100,fontSize:11,color:'var(--text-dim)'}}>{g.id}</td>
+                      <td style={{fontSize:12,color:'var(--text-dim)'}}>{g.created_at || '-'}</td>
+                      <td>
+                        <button className="btn-ghost btn-sm" onClick={() => loadMembers(g.id)}>Members</button>{' '}
+                        <button className="btn-danger btn-sm" onClick={() => handleDelete(g.id)}>Delete</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          {members && (
+            <div className="card" style={{width:320,flexShrink:0}}>
+              <div className="card-header"><h3>Members</h3></div>
+              <div className="card-body">
+                <div style={{display:'flex',gap:6,marginBottom:12}}>
+                  <input placeholder={tab === 'user' ? 'User ID' : 'Device ID'} value={memberId} onChange={e => setMemberId(e.target.value)} style={{flex:1}} />
+                  <button className="btn-primary btn-sm" onClick={addMember}>Add</button>
+                </div>
+                {members.list.length === 0 ? <div className="empty-state" style={{padding:16}}>No members</div> :
+                 members.list.map(m => (
+                  <div key={m.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 0',borderBottom:'1px solid var(--border)'}}>
+                    <span style={{fontSize:13}}>{m.id}</span>
+                    <button className="btn-danger btn-sm" onClick={() => removeMember(m.id)}>Remove</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        {modal === 'create' && (
+          <Modal title={`Create ${tab === 'user' ? 'User' : 'Device'} Group`} onClose={() => setModal(null)} footer={
+            <React.Fragment>
+              <button className="btn-ghost" onClick={() => setModal(null)}>Cancel</button>
+              <button className="btn-primary" onClick={handleCreate}>Create</button>
+            </React.Fragment>
+          }>
+            {formError && <div className="error-msg">{formError}</div>}
+            <div className="form-group"><label>Name</label><input value={name} onChange={e => setName(e.target.value)} autoFocus /></div>
+          </Modal>
+        )}
+      </div>
+    </React.Fragment>
+  );
+}
+
+// =========================================================================
+// Strategies Page
+// =========================================================================
+function StrategiesPage() {
+  const { data, loading, error, reload } = useApi(() => api.get('/api/strategies'));
+  const [modal, setModal] = React.useState(null);
+  const [form, setForm] = React.useState({ name: '', settings: '{}' });
+  const [assignForm, setAssignForm] = React.useState({ target_type: 'user', target_id: '' });
+  const [formError, setFormError] = React.useState('');
+  const [saving, setSaving] = React.useState(false);
+
+  const openCreate = () => { setForm({ name: '', settings: '{}' }); setFormError(''); setModal('create'); };
+  const openEdit = (s) => { setForm({ name: s.name, settings: JSON.stringify(s.settings, null, 2) }); setFormError(''); setModal({ edit: s }); };
+  const openAssign = (s) => { setAssignForm({ target_type: 'user', target_id: '' }); setFormError(''); setModal({ assign: s }); };
+
+  const handleSave = async () => {
+    setSaving(true); setFormError('');
+    try {
+      let settings;
+      try { settings = JSON.parse(form.settings); } catch { throw new Error('Invalid JSON in settings'); }
+      if (modal === 'create') {
+        await api.post('/api/strategies', { name: form.name, settings });
+      } else {
+        await api.put(`/api/strategies/${modal.edit.id}`, { name: form.name, settings });
+      }
+      setModal(null); reload();
+    } catch (e) { setFormError(e.message); }
+    setSaving(false);
+  };
+
+  const handleDelete = async (id) => {
+    if (!confirm('Delete this strategy?')) return;
+    try { await api.del(`/api/strategies/${id}`); reload(); } catch (e) { alert(e.message); }
+  };
+
+  const handleAssign = async () => {
+    setFormError('');
+    try {
+      await api.post(`/api/strategies/${modal.assign.id}/assign`, assignForm);
+      setModal(null);
+    } catch (e) { setFormError(e.message); }
+  };
+
+  return (
+    <React.Fragment>
+      <div className="page-header"><h2>Strategies</h2><p>Security and access policies</p></div>
+      <div className="content">
+        <div className="toolbar"><div /><button className="btn-primary" onClick={openCreate}>+ Create Strategy</button></div>
+        {error && <div className="error-msg">{error}</div>}
+        <div className="card">
+          <div className="scroll-table">
+            <table>
+              <thead><tr><th>Name</th><th>Settings</th><th>Created</th><th>Actions</th></tr></thead>
+              <tbody>
+                {loading ? <tr><td colSpan="4">Loading...</td></tr> :
+                 (!data || data.length === 0) ? <tr><td colSpan="4" className="empty-state">No strategies</td></tr> :
+                 data.map(s => (
+                  <tr key={s.id}>
+                    <td><strong>{s.name}</strong></td>
+                    <td className="truncate" style={{fontFamily:'var(--mono)',fontSize:11}}>{JSON.stringify(s.settings)}</td>
+                    <td style={{fontSize:12,color:'var(--text-dim)'}}>{s.created_at || '-'}</td>
+                    <td>
+                      <button className="btn-ghost btn-sm" onClick={() => openEdit(s)}>Edit</button>{' '}
+                      <button className="btn-ghost btn-sm" onClick={() => openAssign(s)}>Assign</button>{' '}
+                      <button className="btn-danger btn-sm" onClick={() => handleDelete(s.id)}>Delete</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {(modal === 'create' || modal?.edit) && (
+          <Modal title={modal === 'create' ? 'Create Strategy' : 'Edit Strategy'} onClose={() => setModal(null)} footer={
+            <React.Fragment>
+              <button className="btn-ghost" onClick={() => setModal(null)}>Cancel</button>
+              <button className="btn-primary" onClick={handleSave} disabled={saving}>{saving ? 'Saving...' : 'Save'}</button>
+            </React.Fragment>
+          }>
+            {formError && <div className="error-msg">{formError}</div>}
+            <div className="form-group"><label>Name</label><input value={form.name} onChange={e => setForm({...form, name: e.target.value})} /></div>
+            <div className="form-group"><label>Settings (JSON)</label><textarea className="json-editor" value={form.settings} onChange={e => setForm({...form, settings: e.target.value})} /></div>
+          </Modal>
+        )}
+        {modal?.assign && (
+          <Modal title={`Assign "${modal.assign.name}"`} onClose={() => setModal(null)} footer={
+            <React.Fragment>
+              <button className="btn-ghost" onClick={() => setModal(null)}>Cancel</button>
+              <button className="btn-primary" onClick={handleAssign}>Assign</button>
+            </React.Fragment>
+          }>
+            {formError && <div className="error-msg">{formError}</div>}
+            <div className="form-group"><label>Target Type</label>
+              <select value={assignForm.target_type} onChange={e => setAssignForm({...assignForm, target_type: e.target.value})}>
+                <option value="user">User</option><option value="device">Device</option>
+                <option value="user_group">User Group</option><option value="device_group">Device Group</option>
+              </select>
+            </div>
+            <div className="form-group"><label>Target ID</label><input value={assignForm.target_id} onChange={e => setAssignForm({...assignForm, target_id: e.target.value})} /></div>
+          </Modal>
+        )}
+      </div>
+    </React.Fragment>
+  );
+}
+
+// =========================================================================
+// Roles Page
+// =========================================================================
+function RolesPage() {
+  const { data, loading, error, reload } = useApi(() => api.get('/api/roles'));
+  const [modal, setModal] = React.useState(null);
+  const [form, setForm] = React.useState({ name: '', scope: 'individual', permissions: '{}' });
+  const [assignForm, setAssignForm] = React.useState({ user_id: '', role_id: '' });
+  const [formError, setFormError] = React.useState('');
+  const [saving, setSaving] = React.useState(false);
+
+  const RESOURCES = ['users', 'devices', 'audit', 'strategies', 'groups', 'address_book', 'roles', 'control_roles'];
+
+  const openCreate = () => { setForm({ name: '', scope: 'individual', permissions: '{}' }); setFormError(''); setModal('create'); };
+  const openEdit = (r) => { setForm({ name: r.name, scope: r.scope, permissions: JSON.stringify(r.permissions, null, 2) }); setFormError(''); setModal({ edit: r }); };
+
+  const handleSave = async () => {
+    setSaving(true); setFormError('');
+    try {
+      let permissions;
+      try { permissions = JSON.parse(form.permissions); } catch { throw new Error('Invalid JSON in permissions'); }
+      if (modal === 'create') {
+        await api.post('/api/roles', { name: form.name, scope: form.scope, permissions });
+      } else {
+        await api.put(`/api/roles/${modal.edit.id}`, { name: form.name, scope: form.scope, permissions });
+      }
+      setModal(null); reload();
+    } catch (e) { setFormError(e.message); }
+    setSaving(false);
+  };
+
+  const handleDelete = async (id) => {
+    if (!confirm('Delete this role?')) return;
+    try { await api.del(`/api/roles/${id}`); reload(); } catch (e) { alert(e.message); }
+  };
+
+  const handleAssign = async () => {
+    setFormError('');
+    try { await api.post('/api/roles/assign', assignForm); setModal(null); } catch (e) { setFormError(e.message); }
+  };
+
+  const handleRemove = async () => {
+    setFormError('');
+    try { await api.post('/api/roles/remove', assignForm); setModal(null); } catch (e) { setFormError(e.message); }
+  };
+
+  return (
+    <React.Fragment>
+      <div className="page-header"><h2>Roles</h2><p>Role-based access control</p></div>
+      <div className="content">
+        <div className="toolbar">
+          <div className="toolbar-left">
+            <button className="btn-ghost" onClick={() => { setAssignForm({ user_id: '', role_id: '' }); setFormError(''); setModal('assign'); }}>Assign/Remove Role</button>
+          </div>
+          <button className="btn-primary" onClick={openCreate}>+ Create Role</button>
+        </div>
+        {error && <div className="error-msg">{error}</div>}
+        <div className="card">
+          <div className="scroll-table">
+            <table>
+              <thead><tr><th>Name</th><th>Scope</th><th>Permissions</th><th>Actions</th></tr></thead>
+              <tbody>
+                {loading ? <tr><td colSpan="4">Loading...</td></tr> :
+                 (!data || data.length === 0) ? <tr><td colSpan="4" className="empty-state">No roles</td></tr> :
+                 data.map(r => (
+                  <tr key={r.id}>
+                    <td><strong>{r.name}</strong></td>
+                    <td><span className="badge" style={{background:'var(--bg-hover)'}}>{r.scope}</span></td>
+                    <td style={{fontSize:12}}>
+                      {Object.entries(r.permissions || {}).map(([k, v]) => (
+                        <span key={k} className={`badge badge-${v === 'edit' ? 'enable' : v === 'view' ? 'client' : 'disable'}`} style={{margin:'1px 2px'}}>{k}:{v}</span>
+                      ))}
+                    </td>
+                    <td>
+                      <button className="btn-ghost btn-sm" onClick={() => openEdit(r)}>Edit</button>{' '}
+                      <button className="btn-danger btn-sm" onClick={() => handleDelete(r.id)}>Delete</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {(modal === 'create' || modal?.edit) && (
+          <Modal title={modal === 'create' ? 'Create Role' : 'Edit Role'} onClose={() => setModal(null)} footer={
+            <React.Fragment>
+              <button className="btn-ghost" onClick={() => setModal(null)}>Cancel</button>
+              <button className="btn-primary" onClick={handleSave} disabled={saving}>{saving ? 'Saving...' : 'Save'}</button>
+            </React.Fragment>
+          }>
+            {formError && <div className="error-msg">{formError}</div>}
+            <div className="form-group"><label>Name</label><input value={form.name} onChange={e => setForm({...form, name: e.target.value})} /></div>
+            <div className="form-group"><label>Scope</label>
+              <select value={form.scope} onChange={e => setForm({...form, scope: e.target.value})}>
+                <option value="global">Global</option><option value="group">Group</option><option value="individual">Individual</option>
+              </select>
+            </div>
+            <div className="form-group"><label>Permissions (JSON)</label>
+              <textarea className="json-editor" value={form.permissions} onChange={e => setForm({...form, permissions: e.target.value})} placeholder={'{\n  "users": "edit",\n  "devices": "view"\n}'} />
+              <div style={{fontSize:11,color:'var(--text-dim)',marginTop:4}}>Resources: {RESOURCES.join(', ')} | Levels: edit, view, none</div>
+            </div>
+          </Modal>
+        )}
+        {modal === 'assign' && (
+          <Modal title="Assign / Remove Role" onClose={() => setModal(null)} footer={
+            <React.Fragment>
+              <button className="btn-ghost" onClick={() => setModal(null)}>Cancel</button>
+              <button className="btn-danger" onClick={handleRemove}>Remove</button>
+              <button className="btn-primary" onClick={handleAssign}>Assign</button>
+            </React.Fragment>
+          }>
+            {formError && <div className="error-msg">{formError}</div>}
+            <div className="form-group"><label>User ID</label><input value={assignForm.user_id} onChange={e => setAssignForm({...assignForm, user_id: e.target.value})} /></div>
+            <div className="form-group"><label>Role ID</label>
+              <select value={assignForm.role_id} onChange={e => setAssignForm({...assignForm, role_id: e.target.value})}>
+                <option value="">-- Select role --</option>
+                {data && data.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+              </select>
+            </div>
+          </Modal>
+        )}
+      </div>
+    </React.Fragment>
+  );
+}
+
+// =========================================================================
+// Control Roles Page
+// =========================================================================
+function ControlRolesPage() {
+  const { data, loading, error, reload } = useApi(() => api.get('/api/control-roles'));
+  const [modal, setModal] = React.useState(null);
+  const FIELDS = ['keyboard_mouse', 'clipboard', 'file_transfer', 'audio', 'terminal', 'tunnel', 'recording', 'block_input'];
+  const DEFAULTS = { keyboard_mouse: 'enable', clipboard: 'enable', file_transfer: 'enable', audio: 'enable', terminal: 'enable', tunnel: 'enable', recording: 'disable', block_input: 'enable' };
+  const [form, setForm] = React.useState({ name: '', ...DEFAULTS });
+  const [assignForm, setAssignForm] = React.useState({ user_id: '', control_role_id: '' });
+  const [formError, setFormError] = React.useState('');
+  const [saving, setSaving] = React.useState(false);
+
+  const openCreate = () => { setForm({ name: '', ...DEFAULTS }); setFormError(''); setModal('create'); };
+  const openEdit = (cr) => { const f = { name: cr.name }; FIELDS.forEach(k => f[k] = cr[k]); setForm(f); setFormError(''); setModal({ edit: cr }); };
+
+  const handleSave = async () => {
+    setSaving(true); setFormError('');
+    try {
+      if (modal === 'create') {
+        await api.post('/api/control-roles', form);
+      } else {
+        await api.put(`/api/control-roles/${modal.edit.id}`, form);
+      }
+      setModal(null); reload();
+    } catch (e) { setFormError(e.message); }
+    setSaving(false);
+  };
+
+  const handleDelete = async (id) => {
+    if (!confirm('Delete this control role?')) return;
+    try { await api.del(`/api/control-roles/${id}`); reload(); } catch (e) { alert(e.message); }
+  };
+
+  const handleAssign = async () => {
+    setFormError('');
+    try { await api.post('/api/control-roles/assign', assignForm); setModal(null); } catch (e) { setFormError(e.message); }
+  };
+
+  const fieldLabel = (f) => f.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join(' ');
+
+  return (
+    <React.Fragment>
+      <div className="page-header"><h2>Control Roles</h2><p>Session permission profiles</p></div>
+      <div className="content">
+        <div className="toolbar">
+          <div className="toolbar-left">
+            <button className="btn-ghost" onClick={() => { setAssignForm({ user_id: '', control_role_id: '' }); setFormError(''); setModal('assign'); }}>Assign to User</button>
+          </div>
+          <button className="btn-primary" onClick={openCreate}>+ Create Control Role</button>
+        </div>
+        {error && <div className="error-msg">{error}</div>}
+        <div className="card">
+          <div className="scroll-table">
+            <table>
+              <thead><tr><th>Name</th>{FIELDS.map(f => <th key={f} style={{fontSize:10}}>{fieldLabel(f)}</th>)}<th>Actions</th></tr></thead>
+              <tbody>
+                {loading ? <tr><td colSpan={FIELDS.length + 2}>Loading...</td></tr> :
+                 (!data || data.length === 0) ? <tr><td colSpan={FIELDS.length + 2} className="empty-state">No control roles</td></tr> :
+                 data.map(cr => (
+                  <tr key={cr.id}>
+                    <td><strong>{cr.name}</strong></td>
+                    {FIELDS.map(f => <td key={f}><span className={`badge badge-${cr[f]}`}>{cr[f]}</span></td>)}
+                    <td>
+                      <button className="btn-ghost btn-sm" onClick={() => openEdit(cr)}>Edit</button>{' '}
+                      <button className="btn-danger btn-sm" onClick={() => handleDelete(cr.id)}>Delete</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {(modal === 'create' || modal?.edit) && (
+          <Modal title={modal === 'create' ? 'Create Control Role' : 'Edit Control Role'} onClose={() => setModal(null)} footer={
+            <React.Fragment>
+              <button className="btn-ghost" onClick={() => setModal(null)}>Cancel</button>
+              <button className="btn-primary" onClick={handleSave} disabled={saving}>{saving ? 'Saving...' : 'Save'}</button>
+            </React.Fragment>
+          }>
+            {formError && <div className="error-msg">{formError}</div>}
+            <div className="form-group"><label>Name</label><input value={form.name} onChange={e => setForm({...form, name: e.target.value})} /></div>
+            {FIELDS.map(f => (
+              <div className="form-group" key={f}><label>{fieldLabel(f)}</label>
+                <select value={form[f]} onChange={e => setForm({...form, [f]: e.target.value})}>
+                  <option value="enable">Enable</option><option value="disable">Disable</option><option value="client">Client decides</option>
+                </select>
+              </div>
+            ))}
+          </Modal>
+        )}
+        {modal === 'assign' && (
+          <Modal title="Assign Control Role" onClose={() => setModal(null)} footer={
+            <React.Fragment>
+              <button className="btn-ghost" onClick={() => setModal(null)}>Cancel</button>
+              <button className="btn-primary" onClick={handleAssign}>Assign</button>
+            </React.Fragment>
+          }>
+            {formError && <div className="error-msg">{formError}</div>}
+            <div className="form-group"><label>User ID</label><input value={assignForm.user_id} onChange={e => setAssignForm({...assignForm, user_id: e.target.value})} /></div>
+            <div className="form-group"><label>Control Role</label>
+              <select value={assignForm.control_role_id} onChange={e => setAssignForm({...assignForm, control_role_id: e.target.value})}>
+                <option value="">-- Select control role --</option>
+                {data && data.map(cr => <option key={cr.id} value={cr.id}>{cr.name}</option>)}
+              </select>
+            </div>
+          </Modal>
+        )}
+      </div>
+    </React.Fragment>
+  );
+}
+
+// =========================================================================
+// Audit Logs Page
+// =========================================================================
+function AuditPage() {
+  const { data, loading, error, reload } = useApi(() => api.get('/api/audit/conn'));
+  const [filter, setFilter] = React.useState({ type: '', peer: '' });
+
+  const filtered = React.useMemo(() => {
+    if (!Array.isArray(data)) return [];
+    return data.filter(e => {
+      if (filter.type && e.conn_type !== filter.type) return false;
+      if (filter.peer) {
+        const q = filter.peer.toLowerCase();
+        if (!e.from_peer.toLowerCase().includes(q) && !e.to_peer.toLowerCase().includes(q)) return false;
+      }
+      return true;
+    }).reverse();
+  }, [data, filter]);
+
+  return (
+    <React.Fragment>
+      <div className="page-header"><h2>Audit Logs</h2><p>Connection and file transfer history</p></div>
+      <div className="content">
+        <div className="filter-bar">
+          <select value={filter.type} onChange={e => setFilter({...filter, type: e.target.value})}>
+            <option value="">All types</option>
+            <option value="remote_desktop">Remote Desktop</option>
+            <option value="file_transfer">File Transfer</option>
+          </select>
+          <input placeholder="Search peer ID..." value={filter.peer} onChange={e => setFilter({...filter, peer: e.target.value})} />
+          <button className="btn-ghost" onClick={reload}>Refresh</button>
+        </div>
+        {error && <div className="error-msg">{error}</div>}
+        <div className="card">
+          <div className="scroll-table">
+            <table>
+              <thead><tr><th>ID</th><th>From Peer</th><th>To Peer</th><th>Type</th><th>Timestamp</th><th>Note</th></tr></thead>
+              <tbody>
+                {loading ? <tr><td colSpan="6">Loading...</td></tr> :
+                 filtered.length === 0 ? <tr><td colSpan="6" className="empty-state">No audit entries</td></tr> :
+                 filtered.map(e => (
+                  <tr key={e.id}>
+                    <td>{e.id}</td>
+                    <td style={{fontFamily:'var(--mono)',fontSize:12}}>{e.from_peer}</td>
+                    <td style={{fontFamily:'var(--mono)',fontSize:12}}>{e.to_peer}</td>
+                    <td><span className={`badge badge-${e.conn_type === 'file_transfer' ? 'client' : 'enable'}`}>{e.conn_type}</span></td>
+                    <td style={{fontSize:12,color:'var(--text-dim)'}}>{e.timestamp}</td>
+                    <td>{e.note || '-'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </React.Fragment>
+  );
+}
+
+// =========================================================================
+// Address Book Page
+// =========================================================================
+function AddressBookPage() {
+  const { data, loading, error, reload } = useApi(() => api.get('/api/ab'));
+  const [modal, setModal] = React.useState(null);
+  const [form, setForm] = React.useState({ peer_id: '', alias: '', tags: '' });
+  const [formError, setFormError] = React.useState('');
+
+  const handleSave = async () => {
+    setFormError('');
+    try {
+      const entries = data?.entries ? [...data.entries] : [];
+      const tags = form.tags ? form.tags.split(',').map(t => t.trim()).filter(Boolean) : [];
+      const newEntry = { id: 'e_' + Date.now(), peer_id: form.peer_id, alias: form.alias, tags, hash: '' };
+      entries.push(newEntry);
+      const allTags = [...new Set(entries.flatMap(e => e.tags))];
+      await api.post('/api/ab', { entries, tags: allTags });
+      setModal(null); reload();
+    } catch (e) { setFormError(e.message); }
+  };
+
+  const handleDelete = async (id) => {
+    try { await api.del(`/api/ab/entries/${id}`); reload(); } catch (e) { alert(e.message); }
+  };
+
+  return (
+    <React.Fragment>
+      <div className="page-header"><h2>Address Book</h2><p>Your saved peers</p></div>
+      <div className="content">
+        <div className="toolbar">
+          <div className="toolbar-left">
+            {data?.tags?.length > 0 && data.tags.map(t => <span key={t} className="tag">{t}</span>)}
+          </div>
+          <button className="btn-primary" onClick={() => { setForm({ peer_id: '', alias: '', tags: '' }); setFormError(''); setModal('create'); }}>+ Add Entry</button>
+        </div>
+        {error && <div className="error-msg">{error}</div>}
+        <div className="card">
+          <div className="scroll-table">
+            <table>
+              <thead><tr><th>Peer ID</th><th>Alias</th><th>Tags</th><th>Hash</th><th>Actions</th></tr></thead>
+              <tbody>
+                {loading ? <tr><td colSpan="5">Loading...</td></tr> :
+                 (!data?.entries || data.entries.length === 0) ? <tr><td colSpan="5" className="empty-state">No address book entries</td></tr> :
+                 data.entries.map(e => (
+                  <tr key={e.id}>
+                    <td style={{fontFamily:'var(--mono)'}}>{e.peer_id}</td>
+                    <td>{e.alias || '-'}</td>
+                    <td>{e.tags?.map(t => <span key={t} className="tag">{t}</span>) || '-'}</td>
+                    <td className="truncate" style={{maxWidth:80,fontSize:11,color:'var(--text-dim)'}}>{e.hash || '-'}</td>
+                    <td><button className="btn-danger btn-sm" onClick={() => handleDelete(e.id)}>Delete</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {modal === 'create' && (
+          <Modal title="Add Address Book Entry" onClose={() => setModal(null)} footer={
+            <React.Fragment>
+              <button className="btn-ghost" onClick={() => setModal(null)}>Cancel</button>
+              <button className="btn-primary" onClick={handleSave}>Add</button>
+            </React.Fragment>
+          }>
+            {formError && <div className="error-msg">{formError}</div>}
+            <div className="form-group"><label>Peer ID</label><input value={form.peer_id} onChange={e => setForm({...form, peer_id: e.target.value})} /></div>
+            <div className="form-group"><label>Alias</label><input value={form.alias} onChange={e => setForm({...form, alias: e.target.value})} /></div>
+            <div className="form-group"><label>Tags (comma separated)</label><input value={form.tags} onChange={e => setForm({...form, tags: e.target.value})} placeholder="home, office" /></div>
+          </Modal>
+        )}
+      </div>
+    </React.Fragment>
+  );
+}
+
+// =========================================================================
+// App Shell
+// =========================================================================
+const PAGES = [
+  { id: 'dashboard', label: 'Dashboard', icon: '\u25A3', section: null },
+  { id: 'users', label: 'Users', icon: '\u2630', section: 'Management' },
+  { id: 'groups', label: 'Groups', icon: '\u2687', section: null },
+  { id: 'strategies', label: 'Strategies', icon: '\u2699', section: 'Policy' },
+  { id: 'roles', label: 'Roles', icon: '\u2694', section: null },
+  { id: 'control-roles', label: 'Control Roles', icon: '\u2638', section: null },
+  { id: 'audit', label: 'Audit Logs', icon: '\u2637', section: 'Monitoring' },
+  { id: 'address-book', label: 'Address Book', icon: '\u2606', section: null },
+];
+
+function App() {
+  const [user, setUser] = React.useState(api.getUser());
+  const [page, setPage] = React.useState('dashboard');
+
+  if (!api.getToken() || !user) {
+    return <LoginPage onLogin={(u) => setUser(u)} />;
+  }
+
+  const logout = () => { api.clearToken(); setUser(null); };
+
+  const renderPage = () => {
+    switch (page) {
+      case 'dashboard': return <DashboardPage />;
+      case 'users': return <UsersPage />;
+      case 'groups': return <GroupsPage />;
+      case 'strategies': return <StrategiesPage />;
+      case 'roles': return <RolesPage />;
+      case 'control-roles': return <ControlRolesPage />;
+      case 'audit': return <AuditPage />;
+      case 'address-book': return <AddressBookPage />;
+      default: return <DashboardPage />;
+    }
+  };
+
+  let lastSection = null;
+  return (
+    <div className="layout">
+      <div className="sidebar">
+        <div className="sidebar-header">
+          <h1>RustDesk Pro</h1>
+          <div className="subtitle">Admin Console</div>
+        </div>
+        <div className="nav-items">
+          {PAGES.map(p => {
+            const items = [];
+            if (p.section && p.section !== lastSection) {
+              lastSection = p.section;
+              items.push(<div key={'s_' + p.section} className="nav-section">{p.section}</div>);
+            }
+            items.push(
+              <div key={p.id} className={`nav-item ${page === p.id ? 'active' : ''}`} onClick={() => setPage(p.id)}>
+                <span className="icon">{p.icon}</span> {p.label}
+              </div>
+            );
+            return items;
+          })}
+        </div>
+        <div className="sidebar-footer">
+          <div className="user-info">
+            <span>{user.is_admin ? '\u2605' : '\u2606'}</span>
+            <span>{user.name} {user.is_admin && <span className="badge badge-admin" style={{fontSize:9}}>admin</span>}</span>
+          </div>
+          <div className="logout-btn" onClick={logout}>Sign Out</div>
+        </div>
+      </div>
+      <div className="main">
+        {renderPage()}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
