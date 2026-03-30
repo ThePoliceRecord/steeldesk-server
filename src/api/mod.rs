@@ -2,8 +2,10 @@ pub mod address_book;
 pub mod audit;
 pub mod auth;
 pub mod control_roles;
+pub mod custom_client;
 pub mod groups;
 pub mod heartbeat;
+pub mod ldap;
 pub mod oidc;
 pub mod recordings;
 pub mod roles;
@@ -316,6 +318,19 @@ pub async fn build_router(db: Database) -> Router {
             "/api/control-roles/effective/:user_id",
             get(control_roles::get_effective_control_role),
         )
+        // Custom client generator
+        .route(
+            "/api/custom-client/generate",
+            post(custom_client::generate_custom_client),
+        )
+        .route(
+            "/api/custom-client/configs",
+            get(custom_client::list_custom_clients),
+        )
+        .route(
+            "/api/custom-client/configs/:id",
+            delete(custom_client::delete_custom_client),
+        )
         // Web console static files
         .nest(
             "/console",
@@ -325,6 +340,17 @@ pub async fn build_router(db: Database) -> Router {
                 },
             ),
         )
+        // LDAP / Active Directory
+        .route(
+            "/api/ldap/configs",
+            get(ldap::list_configs).post(ldap::create_config),
+        )
+        .route(
+            "/api/ldap/configs/:id",
+            delete(ldap::delete_config),
+        )
+        .route("/api/ldap/login", post(ldap::login))
+        .route("/api/ldap/sync", post(ldap::sync_users))
         // OIDC / SSO
         .route(
             "/api/oidc/providers",
@@ -1226,6 +1252,201 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        cleanup(&db_path);
+    }
+
+    // =====================================================================
+    // Custom client generator
+    // =====================================================================
+
+    #[tokio::test]
+    async fn test_custom_client_generate_requires_auth() {
+        let (router, _db, db_path) = app_and_db().await;
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/custom-client/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"Test","host":"server.com"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn test_custom_client_generate_requires_admin() {
+        let (router, db, db_path) = app_and_db().await;
+        let (_uid, token) = create_non_admin_user(&db, "nonadmin_cc").await;
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/custom-client/generate")
+                    .header("content-type", "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                    .body(Body::from(
+                        r#"{"name":"Test","host":"server.com"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn test_custom_client_generate_success() {
+        let (router, db, db_path) = app_and_db().await;
+        let token = admin_token(&db).await;
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/custom-client/generate")
+                    .header("content-type", "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                    .body(Body::from(
+                        r#"{"name":"MyCompany","host":"server.example.com","key":"PUBKEY123","api":"https://api.example.com","relay":"relay.example.com"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_bytes(resp).await;
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["name"], "MyCompany");
+        assert_eq!(
+            json["config_string"],
+            "host=server.example.com,key=PUBKEY123,api=https://api.example.com,relay=relay.example.com"
+        );
+        assert!(json["download_filenames"]["windows"].as_str().unwrap().contains("steeldesk-"));
+        assert!(json["download_filenames"]["windows"].as_str().unwrap().ends_with(".exe"));
+        assert!(json["id"].as_str().is_some());
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn test_custom_client_generate_missing_host() {
+        let (router, db, db_path) = app_and_db().await;
+        let token = admin_token(&db).await;
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/custom-client/generate")
+                    .header("content-type", "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                    .body(Body::from(
+                        r#"{"name":"Test","host":""}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn test_custom_client_list_and_delete() {
+        let (app, db, db_path) = app_and_db().await;
+        let token = admin_token(&db).await;
+
+        // Generate a config
+        let resp = app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/custom-client/generate")
+                    .header("content-type", "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                    .body(Body::from(
+                        r#"{"name":"ListTest","host":"list.example.com"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_bytes(resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        // List configs
+        let resp = app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/custom-client/configs")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_bytes(resp).await;
+        let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = list.as_array().unwrap();
+        assert!(arr.iter().any(|c| c["id"] == id));
+
+        // Delete the config
+        let resp = app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&format!("/api/custom-client/configs/{}", id))
+                    .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Verify it's gone
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/custom-client/configs")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_bytes(resp).await;
+        let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = list.as_array().unwrap();
+        assert!(!arr.iter().any(|c| c["id"] == id));
+
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn test_custom_client_delete_not_found() {
+        let (router, db, db_path) = app_and_db().await;
+        let token = admin_token(&db).await;
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/custom-client/configs/nonexistent-id")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         cleanup(&db_path);
     }
 }

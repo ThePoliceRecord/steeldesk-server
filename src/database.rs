@@ -172,12 +172,40 @@ pub struct RecordingRow {
     pub uploaded_at: String,
 }
 
+/// Row type for the `custom_clients` table.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CustomClientRow {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub key: String,
+    pub api: String,
+    pub relay: String,
+    pub created_at: String,
+}
+
 /// Row type for the `strategy_assignments` table.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct StrategyAssignmentRow {
     pub strategy_id: String,
     pub target_type: String,
     pub target_id: String,
+}
+
+/// Row type for the `ldap_configs` table.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct LdapConfigRow {
+    pub id: String,
+    pub name: String,
+    pub server_url: String,
+    pub bind_dn: String,
+    pub bind_password: String,
+    pub base_dn: String,
+    pub user_filter: String,
+    pub email_attr: String,
+    pub display_name_attr: String,
+    pub enabled: i32,
+    pub created_at: String,
 }
 
 /// Row type for the `oidc_providers` table.
@@ -419,6 +447,40 @@ impl Database {
                 client_secret TEXT NOT NULL,
                 scopes TEXT NOT NULL DEFAULT 'openid profile email',
                 enabled INTEGER NOT NULL DEFAULT 1,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"
+        )
+        .execute(self.pool.get().await?.deref_mut())
+        .await?;
+
+        // LDAP / Active Directory configuration table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS ldap_configs (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                server_url TEXT NOT NULL,
+                bind_dn TEXT NOT NULL DEFAULT '',
+                bind_password TEXT NOT NULL DEFAULT '',
+                base_dn TEXT NOT NULL,
+                user_filter TEXT NOT NULL DEFAULT '(&(objectClass=person)(uid=%s))',
+                email_attr TEXT NOT NULL DEFAULT 'mail',
+                display_name_attr TEXT NOT NULL DEFAULT 'cn',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"
+        )
+        .execute(self.pool.get().await?.deref_mut())
+        .await?;
+
+        // Custom client configs table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS custom_clients (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                key TEXT NOT NULL DEFAULT '',
+                api TEXT NOT NULL DEFAULT '',
+                relay TEXT NOT NULL DEFAULT '',
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
             )"
         )
@@ -1414,6 +1476,66 @@ impl Database {
     }
 
     // -----------------------------------------------------------------------
+    // LDAP config queries (Pro API)
+    // -----------------------------------------------------------------------
+
+    pub async fn insert_ldap_config(
+        &self,
+        id: &str,
+        name: &str,
+        server_url: &str,
+        bind_dn: &str,
+        bind_password: &str,
+        base_dn: &str,
+        user_filter: &str,
+        email_attr: &str,
+        display_name_attr: &str,
+    ) -> ResultType<()> {
+        sqlx::query(
+            "INSERT INTO ldap_configs (id, name, server_url, bind_dn, bind_password, base_dn, user_filter, email_attr, display_name_attr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(id)
+        .bind(name)
+        .bind(server_url)
+        .bind(bind_dn)
+        .bind(bind_password)
+        .bind(base_dn)
+        .bind(user_filter)
+        .bind(email_attr)
+        .bind(display_name_attr)
+        .execute(self.pool.get().await?.deref_mut())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_ldap_configs(&self) -> ResultType<Vec<LdapConfigRow>> {
+        let rows = sqlx::query_as::<_, LdapConfigRow>(
+            "SELECT id, name, server_url, bind_dn, bind_password, base_dn, user_filter, email_attr, display_name_attr, enabled, created_at FROM ldap_configs ORDER BY created_at ASC"
+        )
+        .fetch_all(self.pool.get().await?.deref_mut())
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn get_ldap_config(&self, id: &str) -> ResultType<Option<LdapConfigRow>> {
+        let row = sqlx::query_as::<_, LdapConfigRow>(
+            "SELECT id, name, server_url, bind_dn, bind_password, base_dn, user_filter, email_attr, display_name_attr, enabled, created_at FROM ldap_configs WHERE id = ?"
+        )
+        .bind(id)
+        .fetch_optional(self.pool.get().await?.deref_mut())
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn delete_ldap_config(&self, id: &str) -> ResultType<bool> {
+        let result = sqlx::query("DELETE FROM ldap_configs WHERE id = ?")
+            .bind(id)
+            .execute(self.pool.get().await?.deref_mut())
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // -----------------------------------------------------------------------
     // Recording queries (Pro API)
     // -----------------------------------------------------------------------
 
@@ -1511,6 +1633,67 @@ impl Database {
         .fetch_all(self.pool.get().await?.deref_mut())
         .await?;
         Ok(rows)
+    }
+
+    // -----------------------------------------------------------------------
+    // Custom client queries (Pro API)
+    // -----------------------------------------------------------------------
+
+    pub async fn insert_custom_client(
+        &self,
+        id: &str,
+        name: &str,
+        host: &str,
+        key: &str,
+        api: &str,
+        relay: &str,
+    ) -> ResultType<CustomClientRow> {
+        sqlx::query(
+            "INSERT INTO custom_clients (id, name, host, key, api, relay) VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        .bind(id)
+        .bind(name)
+        .bind(host)
+        .bind(key)
+        .bind(api)
+        .bind(relay)
+        .execute(self.pool.get().await?.deref_mut())
+        .await?;
+
+        let row = sqlx::query_as::<_, CustomClientRow>(
+            "SELECT id, name, host, key, api, relay, created_at FROM custom_clients WHERE id = ?"
+        )
+        .bind(id)
+        .fetch_one(self.pool.get().await?.deref_mut())
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_custom_clients(&self) -> ResultType<Vec<CustomClientRow>> {
+        let rows = sqlx::query_as::<_, CustomClientRow>(
+            "SELECT id, name, host, key, api, relay, created_at FROM custom_clients ORDER BY created_at DESC"
+        )
+        .fetch_all(self.pool.get().await?.deref_mut())
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn get_custom_client(&self, id: &str) -> ResultType<Option<CustomClientRow>> {
+        let row = sqlx::query_as::<_, CustomClientRow>(
+            "SELECT id, name, host, key, api, relay, created_at FROM custom_clients WHERE id = ?"
+        )
+        .bind(id)
+        .fetch_optional(self.pool.get().await?.deref_mut())
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn delete_custom_client(&self, id: &str) -> ResultType<bool> {
+        let result = sqlx::query("DELETE FROM custom_clients WHERE id = ?")
+            .bind(id)
+            .execute(self.pool.get().await?.deref_mut())
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 }
 

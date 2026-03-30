@@ -969,6 +969,111 @@ function AddressBookPage() {
   );
 }
 
+function CustomClientsPage() {
+  const { data, loading, error, reload } = useApi(() => api.get('/api/custom-client/configs'));
+  const [modal, setModal] = React.useState(null);
+  const [form, setForm] = React.useState({ name: '', host: '', key: '', api: '', relay: '' });
+  const [formError, setFormError] = React.useState('');
+  const [detail, setDetail] = React.useState(null);
+  const [confirmDelete, setConfirmDelete] = React.useState(null);
+
+  const handleGenerate = async () => {
+    setFormError('');
+    try {
+      const result = await api.post('/api/custom-client/generate', form);
+      setModal(null);
+      setDetail(result);
+      reload();
+    } catch (e) { setFormError(e.message); }
+  };
+
+  const handleDelete = async (id) => {
+    try { await api.del(`/api/custom-client/configs/${id}`); setConfirmDelete(null); reload(); } catch (e) { alert(e.message); }
+  };
+
+  return (
+    <React.Fragment>
+      <div className="page-header"><h2>Custom Clients</h2><p>Generate branded client configurations with pre-loaded server settings</p></div>
+      <div className="content">
+        <div className="toolbar">
+          <div className="toolbar-left"></div>
+          <button className="btn-primary" onClick={() => { setForm({ name: '', host: '', key: '', api: '', relay: '' }); setFormError(''); setModal('create'); }}>+ Generate Config</button>
+        </div>
+        {error && <div className="error-msg">{error}</div>}
+        <div className="card">
+          <div className="scroll-table">
+            <table>
+              <thead><tr><th>Name</th><th>Host</th><th>Key</th><th>Relay</th><th>Created</th><th>Actions</th></tr></thead>
+              <tbody>
+                {loading ? <tr><td colSpan="6">Loading...</td></tr> :
+                 (!data || data.length === 0) ? <tr><td colSpan="6" className="empty-state">No custom client configs yet</td></tr> :
+                 data.map(c => (
+                  <tr key={c.id}>
+                    <td style={{fontWeight:600}}>{c.name}</td>
+                    <td style={{fontFamily:'var(--mono)', fontSize:12}}>{c.host}</td>
+                    <td className="truncate" style={{maxWidth:100,fontSize:11,color:'var(--text-dim)'}}>{c.key || '-'}</td>
+                    <td style={{fontSize:12}}>{c.relay || '-'}</td>
+                    <td style={{fontSize:12, color:'var(--text-dim)'}}>{c.created_at}</td>
+                    <td>
+                      <button className="btn-ghost btn-sm" style={{marginRight:4}} onClick={() => setDetail(c)}>View</button>
+                      <button className="btn-danger btn-sm" onClick={() => setConfirmDelete(c.id)}>Delete</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {modal === 'create' && (
+          <Modal title="Generate Custom Client Config" onClose={() => setModal(null)} footer={
+            <React.Fragment>
+              <button className="btn-ghost" onClick={() => setModal(null)}>Cancel</button>
+              <button className="btn-primary" onClick={handleGenerate}>Generate</button>
+            </React.Fragment>
+          }>
+            {formError && <div className="error-msg">{formError}</div>}
+            <div className="form-group"><label>Name</label><input value={form.name} onChange={e => setForm({...form, name: e.target.value})} placeholder="MyCompany Remote" /></div>
+            <div className="form-group"><label>Host (required)</label><input value={form.host} onChange={e => setForm({...form, host: e.target.value})} placeholder="server.example.com" /></div>
+            <div className="form-group"><label>Public Key</label><input value={form.key} onChange={e => setForm({...form, key: e.target.value})} placeholder="Base64-encoded server public key" /></div>
+            <div className="form-group"><label>API Server URL</label><input value={form.api} onChange={e => setForm({...form, api: e.target.value})} placeholder="https://api.example.com" /></div>
+            <div className="form-group"><label>Relay Server</label><input value={form.relay} onChange={e => setForm({...form, relay: e.target.value})} placeholder="relay.example.com" /></div>
+          </Modal>
+        )}
+
+        {detail && (
+          <Modal title={'Config: ' + detail.name} onClose={() => setDetail(null)} footer={
+            <button className="btn-ghost" onClick={() => setDetail(null)}>Close</button>
+          }>
+            <div className="form-group">
+              <label>Config String</label>
+              <input readOnly value={detail.config_string} style={{fontFamily:'var(--mono)', fontSize:12}} onClick={e => { e.target.select(); navigator.clipboard?.writeText(e.target.value); }} />
+              <div style={{fontSize:11, color:'var(--text-dim)', marginTop:2}}>Click to copy. Rename the standard binary to this filename.</div>
+            </div>
+            <div style={{marginTop:16}}>
+              <label style={{fontSize:12, color:'var(--text-dim)', textTransform:'uppercase', letterSpacing:'0.3px'}}>Suggested Filenames</label>
+              {detail.download_filenames && Object.entries(detail.download_filenames).map(([platform, filename]) => (
+                <div key={platform} style={{display:'flex', justifyContent:'space-between', alignItems:'center', padding:'6px 0', borderBottom:'1px solid var(--border)'}}>
+                  <span style={{fontSize:13, textTransform:'capitalize'}}>{platform}</span>
+                  <code style={{fontSize:11, color:'var(--accent)', fontFamily:'var(--mono)', cursor:'pointer', maxWidth:320, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}
+                    title={filename}
+                    onClick={() => navigator.clipboard?.writeText(filename)}>
+                    {filename}
+                  </code>
+                </div>
+              ))}
+            </div>
+          </Modal>
+        )}
+
+        {confirmDelete && (
+          <ConfirmModal message="Delete this custom client config?" onConfirm={() => handleDelete(confirmDelete)} onCancel={() => setConfirmDelete(null)} />
+        )}
+      </div>
+    </React.Fragment>
+  );
+}
+
 // =========================================================================
 // App Shell
 // =========================================================================
@@ -979,6 +1084,7 @@ const PAGES = [
   { id: 'strategies', label: 'Strategies', icon: '\u2699', section: 'Policy' },
   { id: 'roles', label: 'Roles', icon: '\u2694', section: null },
   { id: 'control-roles', label: 'Control Roles', icon: '\u2638', section: null },
+  { id: 'custom-clients', label: 'Custom Clients', icon: '\u2B1A', section: 'Deployment' },
   { id: 'audit', label: 'Audit Logs', icon: '\u2637', section: 'Monitoring' },
   { id: 'address-book', label: 'Address Book', icon: '\u2606', section: null },
 ];
@@ -1002,6 +1108,7 @@ function App() {
       case 'roles': return <RolesPage />;
       case 'control-roles': return <ControlRolesPage />;
       case 'audit': return <AuditPage />;
+      case 'custom-clients': return <CustomClientsPage />;
       case 'address-book': return <AddressBookPage />;
       default: return <DashboardPage />;
     }
