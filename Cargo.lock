@@ -1070,51 +1070,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hbbs"
-version = "1.1.15"
-dependencies = [
- "async-speed-limit",
- "async-trait",
- "axum",
- "base64 0.13.0",
- "bcrypt",
- "chrono",
- "clap",
- "deadpool",
- "dns-lookup",
- "flate2",
- "flexi_logger 0.22.3",
- "hbb_common",
- "headers",
- "http",
- "hyper",
- "ipnetwork",
- "jsonwebtoken",
- "lazy_static",
- "local-ip-address",
- "mac_address",
- "machine-uid 0.2.0",
- "minreq",
- "once_cell",
- "ping",
- "regex",
- "reqwest",
- "rust-ini",
- "serde",
- "serde_derive",
- "serde_json",
- "sodiumoxide",
- "sqlx",
- "tempfile",
- "tokio-tungstenite",
- "tower",
- "tower-http",
- "tungstenite",
- "uuid",
- "whoami",
-]
-
-[[package]]
 name = "headers"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2785,6 +2740,51 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "steeldesk-server"
+version = "1.1.15"
+dependencies = [
+ "async-speed-limit",
+ "async-trait",
+ "axum",
+ "base64 0.13.0",
+ "bcrypt",
+ "chrono",
+ "clap",
+ "deadpool",
+ "dns-lookup",
+ "flate2",
+ "flexi_logger 0.22.3",
+ "hbb_common",
+ "headers",
+ "http",
+ "hyper",
+ "ipnetwork",
+ "jsonwebtoken",
+ "lazy_static",
+ "local-ip-address",
+ "mac_address",
+ "machine-uid 0.2.0",
+ "minreq",
+ "once_cell",
+ "ping",
+ "regex",
+ "reqwest",
+ "rust-ini",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "sodiumoxide",
+ "sqlx",
+ "tempfile",
+ "tokio-tungstenite",
+ "tower",
+ "tower-http",
+ "tungstenite",
+ "uuid",
+ "whoami",
+]
 
 [[package]]
 name = "stringprep"

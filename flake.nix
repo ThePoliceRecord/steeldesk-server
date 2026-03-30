@@ -1,5 +1,5 @@
 {
-  description = "RustDesk server development environment";
+  description = "SteelDesk server development environment";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -20,7 +20,7 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          name = "rustdesk-server";
+          name = "steeldesk-server";
 
           nativeBuildInputs = with pkgs; [
             rustToolchain
@@ -42,10 +42,10 @@
           SQLX_OFFLINE = "true";
 
           shellHook = ''
-            echo "RustDesk server dev shell"
+            echo "SteelDesk server dev shell"
             echo "  Rust: $(rustc --version)"
             echo "  cargo build"
-            echo "  cargo run --bin hbbs"
+            echo "  cargo run --bin steeldesk-server"
             echo "  cargo run --bin hbbr"
             echo "  git submodule update --init --recursive"
           '';

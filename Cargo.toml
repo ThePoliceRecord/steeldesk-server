@@ -1,21 +1,24 @@
 [package]
-name = "hbbs"
+name = "steeldesk-server"
 version = "1.1.15"
 authors = ["rustdesk <info@rustdesk.com>"]
 edition = "2021"
 build = "build.rs"
-default-run = "hbbs"
+default-run = "steeldesk-server"
+
+[lib]
+name = "hbbs"
 
 [[bin]]
 name = "hbbr"
 path = "src/hbbr.rs"
 
 [[bin]]
-name = "rustdesk-utils"
+name = "steeldesk-utils"
 path = "src/utils.rs"
 
 [[bin]]
-name = "rustdesk-api-cli"
+name = "steeldesk-api-cli"
 path = "src/cli.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

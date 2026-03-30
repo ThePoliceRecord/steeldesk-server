@@ -1,4 +1,4 @@
-# CLAUDE.md — RustDesk Server
+# CLAUDE.md — SteelDesk Server
 
 ## Quick Start
 
@@ -8,9 +8,9 @@ git submodule update --init --recursive        # Init hbb_common
 cargo build                                    # Debug build
 cargo build --release                          # Release build
 cargo test                                     # Run tests (292 tests)
-cargo run --bin hbbs                           # Run rendezvous server
+cargo run --bin steeldesk-server                # Run rendezvous server
 cargo run --bin hbbr                           # Run relay server
-cargo run --bin rustdesk-utils                 # CLI utilities
+cargo run --bin steeldesk-utils                 # CLI utilities
 ```
 
 Without nix: `apt install build-essential pkg-config libsodium-dev libssl-dev libzstd-dev sqlite3`
