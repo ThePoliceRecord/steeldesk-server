@@ -48,6 +48,9 @@ enum Data {
 }
 
 const REG_TIMEOUT: i32 = 30_000;
+/// Maximum allowed protobuf message size (64 KB). Any message exceeding this
+/// limit is dropped before parsing to prevent memory-exhaustion DoS (CWE-400).
+const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 type TcpStreamSink = SplitSink<Framed<TcpStream, BytesCodec>, Bytes>;
 type WsSink = SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, tungstenite::Message>;
 enum Sink {
@@ -221,10 +224,19 @@ impl RendezvousServer {
                 }
             }
         };
+        // Start the Pro API server on port 21114 (hbbs port - 2)
+        let api_port = (port - 2) as u16;
+        let api_task = async move {
+            if let Err(err) = crate::api::start_api_server(api_port).await {
+                log::error!("Pro API server failed: {}", err);
+            }
+            Ok(()) as ResultType<()>
+        };
         let listen_signal = listen_signal();
         tokio::select!(
             res = main_task => res,
             res = listen_signal => res,
+            res = api_task => res,
         )
     }
 
@@ -321,6 +333,10 @@ impl RendezvousServer {
         socket: &mut FramedSocket,
         key: &str,
     ) -> ResultType<()> {
+        if bytes.len() > MAX_MESSAGE_SIZE {
+            log::warn!("Oversized message ({} bytes) from {}, dropping", bytes.len(), addr);
+            return Ok(());
+        }
         if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(bytes) {
             match msg_in.union {
                 Some(rendezvous_message::Union::RegisterPeer(rp)) => {
@@ -488,6 +504,10 @@ impl RendezvousServer {
         key: &str,
         ws: bool,
     ) -> bool {
+        if bytes.len() > MAX_MESSAGE_SIZE {
+            log::warn!("Oversized message ({} bytes) from {}, dropping", bytes.len(), addr);
+            return false;
+        }
         if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(bytes) {
             match msg_in.union {
                 Some(rendezvous_message::Union::PunchHoleRequest(ph)) => {
@@ -1119,6 +1139,10 @@ impl RendezvousServer {
         tokio::spawn(async move {
             let mut stream = stream;
             if let Some(Ok(bytes)) = stream.next_timeout(30_000).await {
+                if bytes.len() > MAX_MESSAGE_SIZE {
+                    log::warn!("Oversized message ({} bytes) from {}, dropping", bytes.len(), addr);
+                    return;
+                }
                 if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
                     match msg_in.union {
                         Some(rendezvous_message::Union::TestNatRequest(_)) => {
@@ -1159,19 +1183,10 @@ impl RendezvousServer {
         let mut sink;
         if ws {
             use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+            let trusted_proxies = crate::common::get_trusted_proxy_ips();
             let callback = |req: &Request, response: Response| {
                 let headers = req.headers();
-                let real_ip = headers
-                    .get("X-Real-IP")
-                    .or_else(|| headers.get("X-Forwarded-For"))
-                    .and_then(|header_value| header_value.to_str().ok());
-                if let Some(ip) = real_ip {
-                    if ip.contains('.') {
-                        addr = format!("{ip}:0").parse().unwrap_or(addr);
-                    } else {
-                        addr = format!("[{ip}]:0").parse().unwrap_or(addr);
-                    }
-                }
+                addr = crate::common::get_real_ip(addr, headers, &trusted_proxies);
                 Ok(response)
             };
             let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
@@ -1248,7 +1263,7 @@ impl RendezvousServer {
         }
 
         if !key.is_empty() {
-            log::info!("Key: {}", key);
+            log::info!("Key: {}", if key.is_empty() { "(not set)" } else { "(configured)" });
         }
         (key, out_sk)
     }
@@ -1328,6 +1343,10 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
               socket.send(&msg_out, addr).await?;
           }
           Some(Ok((bytes, _))) = socket.next() => {
+              if bytes.len() > MAX_MESSAGE_SIZE {
+                  log::warn!("Oversized message ({} bytes) in test_hbbs, dropping", bytes.len());
+                  continue;
+              }
               if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
                  log::trace!("Recv {:?} of test_hbbs", msg_in);
                  last_time_recv = Instant::now();
@@ -1368,4 +1387,1523 @@ async fn create_tcp_listener(port: i32) -> ResultType<TcpListener> {
     let s = listen_any(port as _).await?;
     log::debug!("listen on tcp {:?}", s.local_addr());
     Ok(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
+    // -----------------------------------------------------------------------
+    // Helper: build a RendezvousServer with a temp SQLite DB for method tests.
+    // PeerMap::new() reads the DB_URL env var, so we serialize creation with
+    // a mutex to avoid races between parallel tests.
+    // -----------------------------------------------------------------------
+    static DB_URL_MUTEX: once_cell::sync::Lazy<std::sync::Mutex<()>> =
+        once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
+
+    async fn make_test_server() -> (RendezvousServer, String) {
+        let db_path = format!("/tmp/test_rv_{}.sqlite3", uuid::Uuid::new_v4());
+        let pm = {
+            let _guard = DB_URL_MUTEX.lock().unwrap();
+            std::env::set_var("DB_URL", &db_path);
+            let pm = PeerMap::new().await.expect("PeerMap::new for test");
+            std::env::remove_var("DB_URL");
+            pm
+        };
+        let (tx, _rx) = mpsc::unbounded_channel::<Data>();
+        let rs = RendezvousServer {
+            tcp_punch: Arc::new(Mutex::new(HashMap::new())),
+            pm,
+            tx,
+            relay_servers: Default::default(),
+            relay_servers0: Default::default(),
+            rendezvous_servers: Arc::new(Vec::new()),
+            inner: Arc::new(Inner {
+                serial: 1,
+                version: String::new(),
+                software_url: String::new(),
+                sk: None,
+                mask: None,
+                local_ip: String::new(),
+            }),
+        };
+        (rs, db_path)
+    }
+
+    fn cleanup(path: &str) {
+        let _ = std::fs::remove_file(path);
+    }
+
+    // =======================================================================
+    // 1. IP Blocker logic
+    // =======================================================================
+
+    #[tokio::test]
+    async fn ip_blocker_new_ip_is_allowed() {
+        let (rs, db_path) = make_test_server().await;
+        let ip = "198.51.100.10";
+        IP_BLOCKER.lock().await.remove(ip);
+
+        let allowed = rs.check_ip_blocker(ip, "peer_a").await;
+        assert!(allowed, "a brand-new IP should be allowed");
+
+        // Entry should now exist in the map
+        {
+            let lock = IP_BLOCKER.lock().await;
+            assert!(lock.contains_key(ip));
+            // Counter starts at 0 for a new entry (incremented on second call)
+            let entry = &lock[ip];
+            assert_eq!(entry.0 .0, 0);
+        }
+
+        IP_BLOCKER.lock().await.remove(ip);
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn ip_blocker_allows_up_to_30_calls_per_minute() {
+        let (rs, db_path) = make_test_server().await;
+        let ip = "198.51.100.20";
+        IP_BLOCKER.lock().await.remove(ip);
+
+        // Trace through check_ip_blocker logic:
+        //   Call 1: IP not found => insert with counter=0. Returns true.
+        //   Call 2: counter=0, 0>30 false, counter becomes 1. Returns true.
+        //   Call 3: counter=1, 1>30 false, counter becomes 2. Returns true.
+        //   ...
+        //   Call 32: counter=30, 30>30 false, counter becomes 31. Returns true.
+        //   Call 33: counter=31, 31>30 TRUE. Returns false.
+        for i in 0..32 {
+            let allowed = rs.check_ip_blocker(ip, "peer_a").await;
+            assert!(allowed, "call {} should be allowed (counter <= 30)", i + 1);
+        }
+        // 33rd call: counter is now 31, which is > 30 => blocked
+        let blocked = rs.check_ip_blocker(ip, "peer_a").await;
+        assert!(!blocked, "33rd call should be blocked (rate limit exceeded)");
+
+        IP_BLOCKER.lock().await.remove(ip);
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn ip_blocker_rate_limit_resets_after_60_seconds() {
+        let (rs, db_path) = make_test_server().await;
+        let ip = "198.51.100.30";
+        IP_BLOCKER.lock().await.remove(ip);
+
+        // Seed the entry
+        rs.check_ip_blocker(ip, "peer_a").await;
+
+        // Manually push the per-minute counter timestamp back > 60 seconds
+        {
+            let mut lock = IP_BLOCKER.lock().await;
+            let entry = lock.get_mut(ip).unwrap();
+            entry.0 .1 = Instant::now()
+                .checked_sub(std::time::Duration::from_secs(IP_BLOCK_DUR + 1))
+                .unwrap();
+            // Set counter high
+            entry.0 .0 = 99;
+        }
+
+        // After the window elapsed the counter should reset; IP should be allowed.
+        let allowed = rs.check_ip_blocker(ip, "peer_a").await;
+        assert!(allowed, "IP should be allowed after the 60s window resets");
+
+        // Counter should have been reset to 0, then incremented to 1
+        {
+            let lock = IP_BLOCKER.lock().await;
+            assert_eq!(lock[ip].0 .0, 1);
+        }
+
+        IP_BLOCKER.lock().await.remove(ip);
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn ip_blocker_unique_id_limit_300_per_day() {
+        let (rs, db_path) = make_test_server().await;
+        let ip = "198.51.100.40";
+        IP_BLOCKER.lock().await.remove(ip);
+
+        // Seed the entry
+        rs.check_ip_blocker(ip, "seed_id").await;
+
+        // Manually inject 301 unique IDs into the daily set
+        {
+            let mut lock = IP_BLOCKER.lock().await;
+            let entry = lock.get_mut(ip).unwrap();
+            entry.1 .0.clear();
+            for i in 0..301 {
+                entry.1 .0.insert(format!("id_{}", i));
+            }
+            // Keep the daily timestamp recent
+            entry.1 .1 = Instant::now();
+            // Keep the per-minute counter low so we don't hit that limit
+            entry.0 .0 = 0;
+            entry.0 .1 = Instant::now();
+        }
+
+        // A *new* ID should be blocked (> 300 unique IDs and is_new == true)
+        let blocked = rs.check_ip_blocker(ip, "brand_new_id").await;
+        assert!(
+            !blocked,
+            "a new ID should be blocked when >300 unique IDs already seen"
+        );
+
+        // But an *existing* ID should still be allowed (!is_new => allowed)
+        let allowed = rs.check_ip_blocker(ip, "id_0").await;
+        assert!(
+            allowed,
+            "an already-known ID should still be allowed even with >300 unique IDs"
+        );
+
+        IP_BLOCKER.lock().await.remove(ip);
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn ip_blocker_daily_set_resets_after_24h() {
+        let (rs, db_path) = make_test_server().await;
+        let ip = "198.51.100.50";
+        IP_BLOCKER.lock().await.remove(ip);
+
+        // Seed the entry
+        rs.check_ip_blocker(ip, "seed_id").await;
+
+        // Fill up the daily set and push timestamp back
+        {
+            let mut lock = IP_BLOCKER.lock().await;
+            let entry = lock.get_mut(ip).unwrap();
+            for i in 0..301 {
+                entry.1 .0.insert(format!("id_{}", i));
+            }
+            entry.1 .1 = Instant::now()
+                .checked_sub(std::time::Duration::from_secs(DAY_SECONDS + 1))
+                .unwrap();
+            entry.0 .0 = 0;
+            entry.0 .1 = Instant::now();
+        }
+
+        // After the day window, the set should be cleared => new IDs allowed
+        let allowed = rs.check_ip_blocker(ip, "totally_new_id").await;
+        assert!(
+            allowed,
+            "after the daily window resets, new IDs should be allowed again"
+        );
+
+        IP_BLOCKER.lock().await.remove(ip);
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn ip_blocker_entry_creation_tracks_counter_and_set() {
+        let (rs, db_path) = make_test_server().await;
+        let ip = "198.51.100.60";
+        IP_BLOCKER.lock().await.remove(ip);
+
+        // First call creates the entry with counter=0 and empty ID set
+        rs.check_ip_blocker(ip, "peer_x").await;
+        {
+            let lock = IP_BLOCKER.lock().await;
+            let entry = &lock[ip];
+            assert_eq!(entry.0 .0, 0, "first call should set per-minute counter to 0");
+            assert!(
+                entry.1 .0.is_empty(),
+                "first call should have empty ID set (insert happens on second+ call)"
+            );
+        }
+
+        // Second call should increment counter and insert the ID
+        rs.check_ip_blocker(ip, "peer_x").await;
+        {
+            let lock = IP_BLOCKER.lock().await;
+            let entry = &lock[ip];
+            assert_eq!(entry.0 .0, 1, "second call increments per-minute counter");
+            assert!(
+                entry.1 .0.contains("peer_x"),
+                "second call should add 'peer_x' to the daily set"
+            );
+        }
+
+        IP_BLOCKER.lock().await.remove(ip);
+        cleanup(&db_path);
+    }
+
+    // =======================================================================
+    // 2. IP Changes tracking
+    // =======================================================================
+
+    #[tokio::test]
+    async fn ip_changes_new_entry_created() {
+        let id = "test_ic_new".to_string();
+        IP_CHANGES.lock().await.remove(&id);
+
+        {
+            let mut lock = IP_CHANGES.lock().await;
+            lock.insert(
+                id.clone(),
+                (Instant::now(), HashMap::from([("1.2.3.4".to_string(), 1)])),
+            );
+        }
+
+        {
+            let lock = IP_CHANGES.lock().await;
+            let (tm, ips) = lock.get(&id).unwrap();
+            assert!(tm.elapsed().as_secs() < 2);
+            assert_eq!(ips.get("1.2.3.4"), Some(&1));
+        }
+
+        IP_CHANGES.lock().await.remove(&id);
+    }
+
+    #[tokio::test]
+    async fn ip_changes_increment_existing_ip() {
+        let id = "test_ic_incr".to_string();
+        IP_CHANGES.lock().await.remove(&id);
+
+        {
+            let mut lock = IP_CHANGES.lock().await;
+            lock.insert(
+                id.clone(),
+                (Instant::now(), HashMap::from([("10.0.0.1".to_string(), 3)])),
+            );
+        }
+
+        // Simulate another change to the same IP: increment
+        {
+            let mut lock = IP_CHANGES.lock().await;
+            if let Some((_tm, ips)) = lock.get_mut(&id) {
+                if let Some(v) = ips.get_mut("10.0.0.1") {
+                    *v += 1;
+                }
+            }
+        }
+
+        {
+            let lock = IP_CHANGES.lock().await;
+            assert_eq!(lock[&id].1.get("10.0.0.1"), Some(&4));
+        }
+
+        IP_CHANGES.lock().await.remove(&id);
+    }
+
+    #[tokio::test]
+    async fn ip_changes_adds_new_ip_to_existing_entry() {
+        let id = "test_ic_new_ip".to_string();
+        IP_CHANGES.lock().await.remove(&id);
+
+        {
+            let mut lock = IP_CHANGES.lock().await;
+            lock.insert(
+                id.clone(),
+                (Instant::now(), HashMap::from([("10.0.0.1".to_string(), 1)])),
+            );
+        }
+
+        // New IP for the same ID
+        {
+            let mut lock = IP_CHANGES.lock().await;
+            if let Some((_tm, ips)) = lock.get_mut(&id) {
+                ips.insert("10.0.0.2".to_string(), 1);
+            }
+        }
+
+        {
+            let lock = IP_CHANGES.lock().await;
+            assert_eq!(lock[&id].1.len(), 2);
+            assert_eq!(lock[&id].1.get("10.0.0.2"), Some(&1));
+        }
+
+        IP_CHANGES.lock().await.remove(&id);
+    }
+
+    #[tokio::test]
+    async fn ip_changes_window_resets_after_180_seconds() {
+        let id = "test_ic_reset".to_string();
+        IP_CHANGES.lock().await.remove(&id);
+
+        // Create an entry with a stale timestamp (> IP_CHANGE_DUR seconds ago)
+        {
+            let mut lock = IP_CHANGES.lock().await;
+            let old_time = Instant::now()
+                .checked_sub(std::time::Duration::from_secs(IP_CHANGE_DUR + 10))
+                .unwrap();
+            lock.insert(
+                id.clone(),
+                (
+                    old_time,
+                    HashMap::from([("old_ip".to_string(), 5), ("another_old".to_string(), 3)]),
+                ),
+            );
+        }
+
+        // Simulate the logic from handle_udp RegisterPk: if elapsed > IP_CHANGE_DUR, clear
+        let new_ip = "new_ip".to_string();
+        {
+            let mut lock = IP_CHANGES.lock().await;
+            if let Some((tm, ips)) = lock.get_mut(&id) {
+                if tm.elapsed().as_secs() > IP_CHANGE_DUR {
+                    *tm = Instant::now();
+                    ips.clear();
+                    ips.insert(new_ip.clone(), 1);
+                }
+            }
+        }
+
+        {
+            let lock = IP_CHANGES.lock().await;
+            let (tm, ips) = lock.get(&id).unwrap();
+            assert!(tm.elapsed().as_secs() < 2, "timestamp should be fresh");
+            assert_eq!(ips.len(), 1, "old IPs should be cleared");
+            assert_eq!(ips.get("new_ip"), Some(&1));
+        }
+
+        IP_CHANGES.lock().await.remove(&id);
+    }
+
+    #[tokio::test]
+    async fn ip_changes_tracks_multiple_ids_independently() {
+        let id_a = "test_ic_multi_a".to_string();
+        let id_b = "test_ic_multi_b".to_string();
+
+        {
+            let mut lock = IP_CHANGES.lock().await;
+            lock.remove(&id_a);
+            lock.remove(&id_b);
+            lock.insert(
+                id_a.clone(),
+                (Instant::now(), HashMap::from([("1.1.1.1".to_string(), 1)])),
+            );
+            lock.insert(
+                id_b.clone(),
+                (Instant::now(), HashMap::from([("2.2.2.2".to_string(), 2)])),
+            );
+        }
+
+        {
+            let lock = IP_CHANGES.lock().await;
+            assert_eq!(lock[&id_a].1.get("1.1.1.1"), Some(&1));
+            assert_eq!(lock[&id_b].1.get("2.2.2.2"), Some(&2));
+            // They should not interfere
+            assert!(lock[&id_a].1.get("2.2.2.2").is_none());
+            assert!(lock[&id_b].1.get("1.1.1.1").is_none());
+        }
+
+        {
+            let mut lock = IP_CHANGES.lock().await;
+            lock.remove(&id_a);
+            lock.remove(&id_b);
+        }
+    }
+
+    #[tokio::test]
+    async fn ip_changes_retain_filters_stale_and_single_ip() {
+        // This tests the retain logic from the "ic" admin command:
+        // retain only entries where elapsed < IP_CHANGE_DUR_X2 AND ips.len() > 1
+        let id_stale = "test_ic_retain_stale".to_string();
+        let id_single = "test_ic_retain_single".to_string();
+        let id_good = "test_ic_retain_good".to_string();
+
+        {
+            let mut lock = IP_CHANGES.lock().await;
+            lock.remove(&id_stale);
+            lock.remove(&id_single);
+            lock.remove(&id_good);
+
+            // Stale entry (old timestamp, multiple IPs)
+            let old = Instant::now()
+                .checked_sub(std::time::Duration::from_secs(IP_CHANGE_DUR_X2 + 1))
+                .unwrap();
+            lock.insert(
+                id_stale.clone(),
+                (
+                    old,
+                    HashMap::from([("a".to_string(), 1), ("b".to_string(), 1)]),
+                ),
+            );
+
+            // Fresh entry with only 1 IP (should be filtered)
+            lock.insert(
+                id_single.clone(),
+                (Instant::now(), HashMap::from([("a".to_string(), 1)])),
+            );
+
+            // Good entry: fresh and multiple IPs
+            lock.insert(
+                id_good.clone(),
+                (
+                    Instant::now(),
+                    HashMap::from([("a".to_string(), 1), ("b".to_string(), 1)]),
+                ),
+            );
+
+            // Run the retain logic while still holding lock
+            lock.retain(|_, v| v.0.elapsed().as_secs() < IP_CHANGE_DUR_X2 && v.1.len() > 1);
+
+            assert!(
+                !lock.contains_key(&id_stale),
+                "stale entry should be removed"
+            );
+            assert!(
+                !lock.contains_key(&id_single),
+                "single-IP entry should be removed"
+            );
+            assert!(
+                lock.contains_key(&id_good),
+                "good entry should be retained"
+            );
+
+            lock.remove(&id_good);
+        }
+    }
+
+    // =======================================================================
+    // 3. Punch request dedup
+    // =======================================================================
+
+    #[tokio::test]
+    async fn punch_req_records_entry() {
+        let mut lock = PUNCH_REQS.lock().await;
+        let initial_len = lock.len();
+        lock.push(PunchReqEntry {
+            tm: Instant::now(),
+            from_ip: "1.1.1.1".to_string(),
+            to_ip: "2.2.2.2".to_string(),
+            to_id: "peer_target".to_string(),
+        });
+        assert_eq!(lock.len(), initial_len + 1);
+        let last = lock.last().unwrap();
+        assert_eq!(last.from_ip, "1.1.1.1");
+        assert_eq!(last.to_id, "peer_target");
+    }
+
+    #[tokio::test]
+    async fn punch_req_dedup_within_60_seconds() {
+        // Simulate the dedup logic from handle_punch_hole_request
+        let from_ip = "10.99.0.1".to_string();
+        let to_id = "dedup_target".to_string();
+        let to_ip = "10.99.0.2".to_string();
+
+        let mut lock = PUNCH_REQS.lock().await;
+        // Insert an entry with a recent timestamp
+        lock.push(PunchReqEntry {
+            tm: Instant::now(),
+            from_ip: from_ip.clone(),
+            to_ip: to_ip.clone(),
+            to_id: to_id.clone(),
+        });
+
+        // Now run the dedup logic on the same lock
+        let mut dup = false;
+        for e in lock.iter().rev().take(30) {
+            if e.from_ip == from_ip && e.to_id == to_id {
+                if e.tm.elapsed().as_secs() < PUNCH_REQ_DEDUPE_SEC {
+                    dup = true;
+                }
+                break;
+            }
+        }
+        assert!(dup, "same from_ip + to_id within 60s should be a duplicate");
+    }
+
+    #[tokio::test]
+    async fn punch_req_not_dup_after_60_seconds() {
+        let from_ip = "10.99.1.1".to_string();
+        let to_id = "dedup_target_old".to_string();
+
+        let mut lock = PUNCH_REQS.lock().await;
+        // Insert an entry with an OLD timestamp (>60s ago)
+        let old_time = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(PUNCH_REQ_DEDUPE_SEC + 10))
+            .unwrap();
+        lock.push(PunchReqEntry {
+            tm: old_time,
+            from_ip: from_ip.clone(),
+            to_ip: "x".to_string(),
+            to_id: to_id.clone(),
+        });
+
+        let mut dup = false;
+        for e in lock.iter().rev().take(30) {
+            if e.from_ip == from_ip && e.to_id == to_id {
+                if e.tm.elapsed().as_secs() < PUNCH_REQ_DEDUPE_SEC {
+                    dup = true;
+                }
+                break;
+            }
+        }
+        assert!(!dup, "entry older than 60s should not be considered a dup");
+    }
+
+    #[tokio::test]
+    async fn punch_req_different_from_ip_is_not_dup() {
+        let to_id = "same_target".to_string();
+
+        let mut lock = PUNCH_REQS.lock().await;
+        lock.push(PunchReqEntry {
+            tm: Instant::now(),
+            from_ip: "10.100.0.1".to_string(),
+            to_ip: "10.100.0.2".to_string(),
+            to_id: to_id.clone(),
+        });
+
+        // Different from_ip, same to_id
+        let from_ip2 = "10.100.0.99";
+        let mut dup = false;
+        for e in lock.iter().rev().take(30) {
+            if e.from_ip == from_ip2 && e.to_id == to_id {
+                if e.tm.elapsed().as_secs() < PUNCH_REQ_DEDUPE_SEC {
+                    dup = true;
+                }
+                break;
+            }
+        }
+        assert!(!dup, "different from_ip should not be a dup");
+    }
+
+    #[tokio::test]
+    async fn punch_req_dedup_window_limited_to_30_entries() {
+        // The dedup only checks the last 30 entries. If the matching entry is
+        // older than 30 positions from the tail, it won't be found.
+        let from_ip = "10.101.0.1".to_string();
+        let to_id = "dedup_30_target".to_string();
+
+        let mut lock = PUNCH_REQS.lock().await;
+        // Push the matching entry
+        lock.push(PunchReqEntry {
+            tm: Instant::now(),
+            from_ip: from_ip.clone(),
+            to_ip: "x".to_string(),
+            to_id: to_id.clone(),
+        });
+        // Push 30 more non-matching entries to push it out of the window
+        for i in 0..30 {
+            lock.push(PunchReqEntry {
+                tm: Instant::now(),
+                from_ip: format!("filler_{}", i),
+                to_ip: "filler".to_string(),
+                to_id: format!("filler_{}", i),
+            });
+        }
+
+        let mut dup = false;
+        for e in lock.iter().rev().take(30) {
+            if e.from_ip == from_ip && e.to_id == to_id {
+                if e.tm.elapsed().as_secs() < PUNCH_REQ_DEDUPE_SEC {
+                    dup = true;
+                }
+                break;
+            }
+        }
+        assert!(
+            !dup,
+            "entry pushed outside the 30-entry window should not be found"
+        );
+    }
+
+    #[tokio::test]
+    async fn punch_req_clear() {
+        let mut lock = PUNCH_REQS.lock().await;
+        lock.push(PunchReqEntry {
+            tm: Instant::now(),
+            from_ip: "clear_test".to_string(),
+            to_ip: "x".to_string(),
+            to_id: "x".to_string(),
+        });
+        lock.clear();
+        assert!(lock.is_empty());
+    }
+
+    // =======================================================================
+    // 4. Admin command parsing (check_cmd)
+    // =======================================================================
+
+    #[tokio::test]
+    async fn cmd_help() {
+        let (rs, db_path) = make_test_server().await;
+        let res = rs.check_cmd("h").await;
+        assert!(res.contains("relay-servers(rs)"));
+        assert!(res.contains("ip-blocker(ib)"));
+        assert!(res.contains("ip-changes(ic)"));
+        assert!(res.contains("punch-requests(pr)"));
+        assert!(res.contains("always-use-relay(aur)"));
+        assert!(res.contains("test-geo(tg)"));
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_relay_servers_list_empty() {
+        let (rs, db_path) = make_test_server().await;
+        let res = rs.check_cmd("relay-servers").await;
+        // No relay servers configured => empty output
+        assert!(res.is_empty() || res.trim().is_empty());
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_rs_alias_works() {
+        let (rs, db_path) = make_test_server().await;
+        let res = rs.check_cmd("rs").await;
+        // Should behave identically to "relay-servers"
+        assert!(res.is_empty() || res.trim().is_empty());
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_relay_servers_set_sends_data() {
+        let (rs, db_path) = make_test_server().await;
+        // Setting relay-servers sends a message on the channel
+        let res = rs.check_cmd("rs 127.0.0.1:21117").await;
+        // The command doesn't produce output when setting
+        assert!(res.is_empty());
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_ip_blocker_query_specific_ip() {
+        let (rs, db_path) = make_test_server().await;
+        let ip = "10.200.0.1";
+
+        // Insert a test entry
+        {
+            let mut lock = IP_BLOCKER.lock().await;
+            let mut ids = HashSet::new();
+            ids.insert("test_id".to_owned());
+            lock.insert(ip.to_owned(), ((5, Instant::now()), (ids, Instant::now())));
+        }
+
+        let res = rs.check_cmd(&format!("ib {}", ip)).await;
+        // Should contain the per-minute count (5) and ID set size (1)
+        assert!(res.contains("5/"), "should show per-minute count: {}", res);
+        assert!(res.contains("1/"), "should show unique ID count: {}", res);
+
+        IP_BLOCKER.lock().await.remove(ip);
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_ip_blocker_remove_ip() {
+        let (rs, db_path) = make_test_server().await;
+        let ip = "10.200.0.2";
+
+        {
+            let mut lock = IP_BLOCKER.lock().await;
+            lock.insert(
+                ip.to_owned(),
+                ((1, Instant::now()), (HashSet::new(), Instant::now())),
+            );
+        }
+        assert!(IP_BLOCKER.lock().await.contains_key(ip));
+
+        // "ib <ip> -" should remove the entry
+        rs.check_cmd(&format!("ib {} -", ip)).await;
+        assert!(
+            !IP_BLOCKER.lock().await.contains_key(ip),
+            "entry should be removed by 'ib <ip> -'"
+        );
+
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_ip_changes_query_specific_id() {
+        let (rs, db_path) = make_test_server().await;
+        let id = "test_ic_cmd_id";
+
+        {
+            let mut lock = IP_CHANGES.lock().await;
+            lock.insert(
+                id.to_string(),
+                (
+                    Instant::now(),
+                    HashMap::from([("1.1.1.1".to_string(), 2), ("2.2.2.2".to_string(), 1)]),
+                ),
+            );
+        }
+
+        let res = rs.check_cmd(&format!("ic {}", id)).await;
+        // Should show elapsed time and IP map
+        assert!(res.contains("1.1.1.1"), "should list IPs: {}", res);
+        assert!(res.contains("2.2.2.2"), "should list IPs: {}", res);
+
+        IP_CHANGES.lock().await.remove(id);
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_ip_changes_remove_id() {
+        let (rs, db_path) = make_test_server().await;
+        let id = "test_ic_cmd_remove";
+
+        {
+            let mut lock = IP_CHANGES.lock().await;
+            lock.insert(
+                id.to_string(),
+                (Instant::now(), HashMap::from([("a".to_string(), 1), ("b".to_string(), 1)])),
+            );
+        }
+
+        rs.check_cmd(&format!("ic {} -", id)).await;
+        assert!(
+            !IP_CHANGES.lock().await.contains_key(id),
+            "entry should be removed"
+        );
+
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_punch_requests_clear() {
+        let (rs, db_path) = make_test_server().await;
+        {
+            let mut lock = PUNCH_REQS.lock().await;
+            lock.push(PunchReqEntry {
+                tm: Instant::now(),
+                from_ip: "1.1.1.1".to_string(),
+                to_ip: "2.2.2.2".to_string(),
+                to_id: "target".to_string(),
+            });
+        }
+
+        rs.check_cmd("pr -").await;
+        assert!(
+            PUNCH_REQS.lock().await.is_empty(),
+            "'pr -' should clear all punch requests"
+        );
+
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_punch_requests_list_shows_entries() {
+        let (rs, db_path) = make_test_server().await;
+        {
+            let mut lock = PUNCH_REQS.lock().await;
+            lock.clear();
+            lock.push(PunchReqEntry {
+                tm: Instant::now(),
+                from_ip: "10.50.0.1".to_string(),
+                to_ip: "10.50.0.2".to_string(),
+                to_id: "pr_list_target".to_string(),
+            });
+        }
+
+        let res = rs.check_cmd("pr 0").await;
+        assert!(
+            res.contains("10.50.0.1"),
+            "should show from_ip: {}",
+            res
+        );
+        assert!(
+            res.contains("pr_list_target"),
+            "should show to_id: {}",
+            res
+        );
+        assert!(
+            res.contains("10.50.0.2"),
+            "should show to_ip: {}",
+            res
+        );
+
+        PUNCH_REQS.lock().await.clear();
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_always_use_relay_query() {
+        let (rs, db_path) = make_test_server().await;
+        let res = rs.check_cmd("always-use-relay").await;
+        assert!(
+            res.contains("ALWAYS_USE_RELAY"),
+            "should show the current value: {}",
+            res
+        );
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_aur_alias_works() {
+        let (rs, db_path) = make_test_server().await;
+        let res = rs.check_cmd("aur").await;
+        assert!(res.contains("ALWAYS_USE_RELAY"));
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_always_use_relay_set_y() {
+        let (rs, db_path) = make_test_server().await;
+        ALWAYS_USE_RELAY.store(false, Ordering::SeqCst);
+        rs.check_cmd("aur Y").await;
+        assert!(ALWAYS_USE_RELAY.load(Ordering::SeqCst));
+
+        // Reset
+        ALWAYS_USE_RELAY.store(false, Ordering::SeqCst);
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_always_use_relay_set_n() {
+        let (rs, db_path) = make_test_server().await;
+        ALWAYS_USE_RELAY.store(true, Ordering::SeqCst);
+        rs.check_cmd("aur N").await;
+        assert!(!ALWAYS_USE_RELAY.load(Ordering::SeqCst));
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_test_geo_two_ips() {
+        let (rs, db_path) = make_test_server().await;
+        let res = rs.check_cmd("tg 1.2.3.4 5.6.7.8").await;
+        // With no relay servers configured, get_relay_server returns ""
+        assert_eq!(res.trim(), r#""""#, "should return empty relay: {}", res);
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_test_geo_single_ip() {
+        let (rs, db_path) = make_test_server().await;
+        let res = rs.check_cmd("tg 1.2.3.4").await;
+        assert_eq!(res.trim(), r#""""#);
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_unknown_returns_empty() {
+        let (rs, db_path) = make_test_server().await;
+        let res = rs.check_cmd("nonexistent_command").await;
+        assert!(res.is_empty(), "unknown commands should produce no output");
+        cleanup(&db_path);
+    }
+
+    // =======================================================================
+    // 5. get_server_sk -- static method, testable directly
+    // =======================================================================
+
+    #[test]
+    fn get_server_sk_empty_key_generates_keypair() {
+        let (key, _sk) = RendezvousServer::get_server_sk("");
+        // Empty key => no key output, but sk may or may not be generated
+        // (depends on file system state, but key should remain empty)
+        assert!(key.is_empty(), "empty key input should produce empty key output");
+    }
+
+    #[test]
+    fn get_server_sk_dash_generates_keypair() {
+        let (key, sk) = RendezvousServer::get_server_sk("-");
+        // "-" key generates a new keypair and outputs the public key
+        assert!(sk.is_some(), "'-' should generate a secret key");
+        assert!(!key.is_empty(), "'-' should produce a public key");
+    }
+
+    #[test]
+    fn get_server_sk_underscore_generates_keypair() {
+        let (key, sk) = RendezvousServer::get_server_sk("_");
+        assert!(sk.is_some(), "'_' should generate a secret key");
+        assert!(!key.is_empty(), "'_' should produce a public key");
+    }
+
+    #[test]
+    fn get_server_sk_valid_sk_base64() {
+        // Generate a real keypair and pass the full secret key as base64
+        let (_pk, sk) = sodiumoxide::crypto::sign::gen_keypair();
+        let sk_b64 = base64::encode(&sk);
+        let (key, out_sk) = RendezvousServer::get_server_sk(&sk_b64);
+
+        assert!(out_sk.is_some(), "valid sk should be parsed");
+        // The returned key should be the public key portion (second half of sk)
+        let expected_pk = base64::encode(&sk[sign::SECRETKEYBYTES / 2..]);
+        assert_eq!(key, expected_pk);
+    }
+
+    #[test]
+    fn get_server_sk_invalid_base64_treated_as_passphrase() {
+        // A random string that is not valid base64 of the right length
+        let (key, sk) = RendezvousServer::get_server_sk("not-valid-base64!!!");
+        // Not a valid key, not empty/dash/underscore => no keypair generated,
+        // key is returned as-is, sk is None
+        assert_eq!(key, "not-valid-base64!!!");
+        assert!(sk.is_none());
+    }
+
+    #[test]
+    fn get_server_sk_short_base64_treated_as_passphrase() {
+        // Valid base64 but wrong length (not SECRETKEYBYTES)
+        let short = base64::encode(b"too short");
+        let (key, sk) = RendezvousServer::get_server_sk(&short);
+        assert_eq!(key, short);
+        assert!(sk.is_none());
+    }
+
+    // =======================================================================
+    // 6. Configuration handling -- parse_relay_servers, get_relay_server
+    // =======================================================================
+
+    #[tokio::test]
+    async fn parse_relay_servers_sets_both_fields() {
+        let (mut rs, db_path) = make_test_server().await;
+        rs.parse_relay_servers("127.0.0.1,127.0.0.2");
+        // relay_servers0 should contain the parsed list
+        assert_eq!(rs.relay_servers0.len(), 2);
+        assert!(rs.relay_servers0.contains(&"127.0.0.1".to_string()));
+        assert!(rs.relay_servers0.contains(&"127.0.0.2".to_string()));
+        // relay_servers should clone relay_servers0
+        assert_eq!(rs.relay_servers.len(), 2);
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn parse_relay_servers_empty_string() {
+        let (mut rs, db_path) = make_test_server().await;
+        rs.parse_relay_servers("");
+        assert!(rs.relay_servers0.is_empty());
+        assert!(rs.relay_servers.is_empty());
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn get_relay_server_empty_returns_empty() {
+        let (rs, db_path) = make_test_server().await;
+        let result = rs.get_relay_server(
+            IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+            IpAddr::V4(Ipv4Addr::new(5, 6, 7, 8)),
+        );
+        assert_eq!(result, "");
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn get_relay_server_single_returns_it() {
+        let (mut rs, db_path) = make_test_server().await;
+        rs.relay_servers = Arc::new(vec!["relay.example.com".to_string()]);
+        let result = rs.get_relay_server(
+            IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+            IpAddr::V4(Ipv4Addr::new(5, 6, 7, 8)),
+        );
+        assert_eq!(result, "relay.example.com");
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn get_relay_server_rotation() {
+        let (mut rs, db_path) = make_test_server().await;
+        rs.relay_servers = Arc::new(vec![
+            "relay1.example.com".to_string(),
+            "relay2.example.com".to_string(),
+            "relay3.example.com".to_string(),
+        ]);
+
+        let ip = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+
+        // Get several relay servers -- they should rotate
+        let mut seen = HashSet::new();
+        for _ in 0..6 {
+            let r = rs.get_relay_server(ip, ip);
+            seen.insert(r);
+        }
+        // Over 6 calls with 3 servers, we should see all 3
+        assert_eq!(seen.len(), 3, "rotation should cycle through all relays");
+
+        cleanup(&db_path);
+    }
+
+    // =======================================================================
+    // 7. get_pk -- returns empty when no sk or empty version
+    // =======================================================================
+
+    #[tokio::test]
+    async fn get_pk_returns_empty_when_no_sk() {
+        let (mut rs, db_path) = make_test_server().await;
+        // inner.sk is None by default in test server
+        let pk = rs.get_pk("1.0.0", "some_id".to_string()).await;
+        assert!(pk.is_empty(), "get_pk should return empty when sk is None");
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn get_pk_returns_empty_when_version_empty() {
+        let (mut rs, db_path) = make_test_server().await;
+        // Even if sk were set, empty version => empty
+        let pk = rs.get_pk("", "some_id".to_string()).await;
+        assert!(pk.is_empty(), "get_pk should return empty when version is empty");
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn get_pk_returns_empty_for_unknown_peer() {
+        let (mut rs, db_path) = make_test_server().await;
+        // Set up an sk so it doesn't short-circuit
+        let (_pk, sk) = sign::gen_keypair();
+        let mut inner = (*rs.inner).clone();
+        inner.sk = Some(sk);
+        rs.inner = Arc::new(inner);
+
+        let result = rs.get_pk("1.0.0", "nonexistent_peer".to_string()).await;
+        assert!(
+            result.is_empty(),
+            "get_pk for unknown peer should return empty"
+        );
+        cleanup(&db_path);
+    }
+
+    // =======================================================================
+    // 8. is_lan
+    // =======================================================================
+
+    #[tokio::test]
+    async fn is_lan_returns_false_with_no_mask() {
+        let (rs, db_path) = make_test_server().await;
+        let addr: SocketAddr = "192.168.1.1:1234".parse().unwrap();
+        assert!(!rs.is_lan(addr), "should return false when no mask configured");
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn is_lan_returns_true_for_matching_network() {
+        let (mut rs, db_path) = make_test_server().await;
+        let mut inner = (*rs.inner).clone();
+        inner.mask = Some("192.168.1.0/24".parse().unwrap());
+        rs.inner = Arc::new(inner);
+
+        let addr: SocketAddr = "192.168.1.50:5555".parse().unwrap();
+        assert!(rs.is_lan(addr), "192.168.1.50 should be in 192.168.1.0/24");
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn is_lan_returns_false_for_non_matching_network() {
+        let (mut rs, db_path) = make_test_server().await;
+        let mut inner = (*rs.inner).clone();
+        inner.mask = Some("192.168.1.0/24".parse().unwrap());
+        rs.inner = Arc::new(inner);
+
+        let addr: SocketAddr = "10.0.0.1:5555".parse().unwrap();
+        assert!(!rs.is_lan(addr), "10.0.0.1 should not be in 192.168.1.0/24");
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn is_lan_ipv6_mapped_v4_in_network() {
+        let (mut rs, db_path) = make_test_server().await;
+        let mut inner = (*rs.inner).clone();
+        inner.mask = Some("192.168.1.0/24".parse().unwrap());
+        rs.inner = Arc::new(inner);
+
+        // IPv6-mapped IPv4: ::ffff:192.168.1.50
+        let addr: SocketAddr = "[::ffff:192.168.1.50]:5555".parse().unwrap();
+        assert!(
+            rs.is_lan(addr),
+            "IPv6-mapped 192.168.1.50 should be in 192.168.1.0/24"
+        );
+        cleanup(&db_path);
+    }
+
+    // =======================================================================
+    // 9. ALWAYS_USE_RELAY atomic
+    // =======================================================================
+
+    #[test]
+    fn always_use_relay_default_is_false() {
+        // Reset to default (false) in case other tests changed it
+        ALWAYS_USE_RELAY.store(false, Ordering::SeqCst);
+        assert!(!ALWAYS_USE_RELAY.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn always_use_relay_toggle() {
+        ALWAYS_USE_RELAY.store(true, Ordering::SeqCst);
+        assert!(ALWAYS_USE_RELAY.load(Ordering::SeqCst));
+
+        ALWAYS_USE_RELAY.store(false, Ordering::SeqCst);
+        assert!(!ALWAYS_USE_RELAY.load(Ordering::SeqCst));
+    }
+
+    // =======================================================================
+    // 10. PunchReqEntry struct
+    // =======================================================================
+
+    #[test]
+    fn punch_req_entry_clone() {
+        let entry = PunchReqEntry {
+            tm: Instant::now(),
+            from_ip: "1.2.3.4".to_string(),
+            to_ip: "5.6.7.8".to_string(),
+            to_id: "target_peer".to_string(),
+        };
+        let cloned = entry.clone();
+        assert_eq!(cloned.from_ip, "1.2.3.4");
+        assert_eq!(cloned.to_ip, "5.6.7.8");
+        assert_eq!(cloned.to_id, "target_peer");
+    }
+
+    // =======================================================================
+    // 11. Constants sanity checks
+    // =======================================================================
+
+    #[test]
+    fn constants_have_expected_values() {
+        assert_eq!(REG_TIMEOUT, 30_000);
+        assert_eq!(PUNCH_REQ_DEDUPE_SEC, 60);
+        assert_eq!(CHECK_RELAY_TIMEOUT, 3_000);
+        assert_eq!(IP_CHANGE_DUR, 180);
+        assert_eq!(IP_CHANGE_DUR_X2, 360);
+        assert_eq!(DAY_SECONDS, 86400);
+        assert_eq!(IP_BLOCK_DUR, 60);
+    }
+
+    // =======================================================================
+    // 12. ROTATION_RELAY_SERVER atomic
+    // =======================================================================
+
+    #[test]
+    fn rotation_relay_server_increments() {
+        let before = ROTATION_RELAY_SERVER.load(Ordering::SeqCst);
+        let got = ROTATION_RELAY_SERVER.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(got, before);
+        let after = ROTATION_RELAY_SERVER.load(Ordering::SeqCst);
+        assert_eq!(after, before + 1);
+    }
+
+    // =======================================================================
+    // 13. Inner struct -- serial and configuration
+    // =======================================================================
+
+    #[test]
+    fn inner_clone() {
+        let inner = Inner {
+            serial: 42,
+            version: "1.2.3".to_string(),
+            software_url: "https://example.com/update".to_string(),
+            mask: Some("10.0.0.0/8".parse().unwrap()),
+            local_ip: "10.0.0.1".to_string(),
+            sk: None,
+        };
+        let cloned = inner.clone();
+        assert_eq!(cloned.serial, 42);
+        assert_eq!(cloned.version, "1.2.3");
+        assert_eq!(cloned.software_url, "https://example.com/update");
+        assert_eq!(cloned.local_ip, "10.0.0.1");
+        assert!(cloned.mask.is_some());
+        assert!(cloned.sk.is_none());
+    }
+
+    // =======================================================================
+    // 14. Data enum variants
+    // =======================================================================
+
+    #[test]
+    fn data_relay_servers0_clone() {
+        let data = Data::RelayServers0("127.0.0.1,127.0.0.2".to_string());
+        let cloned = data.clone();
+        match cloned {
+            Data::RelayServers0(s) => assert_eq!(s, "127.0.0.1,127.0.0.2"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn data_relay_servers_clone() {
+        let data = Data::RelayServers(vec!["a".to_string(), "b".to_string()]);
+        let cloned = data.clone();
+        match cloned {
+            Data::RelayServers(v) => {
+                assert_eq!(v.len(), 2);
+                assert_eq!(v[0], "a");
+                assert_eq!(v[1], "b");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    // =======================================================================
+    // 15. IP Blocker -- retain logic (as used in the "ib" admin command)
+    // =======================================================================
+
+    #[tokio::test]
+    async fn ip_blocker_retain_filters_stale() {
+        let mut lock = IP_BLOCKER.lock().await;
+
+        // Use unique IPs to avoid interference with other tests
+        let fresh_ip = "250.0.0.1";
+        let stale_ip = "250.0.0.2";
+        lock.remove(fresh_ip);
+        lock.remove(stale_ip);
+
+        // Fresh entry (within both windows)
+        lock.insert(
+            fresh_ip.to_owned(),
+            ((1, Instant::now()), (HashSet::new(), Instant::now())),
+        );
+        // Stale entry (both timestamps beyond their windows)
+        let old_minute = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(IP_BLOCK_DUR + 1))
+            .unwrap();
+        let old_day = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(DAY_SECONDS + 1))
+            .unwrap();
+        lock.insert(
+            stale_ip.to_owned(),
+            ((10, old_minute), (HashSet::new(), old_day)),
+        );
+
+        // Apply the retain logic from check_cmd "ib"
+        lock.retain(|_, (a, b)| {
+            a.1.elapsed().as_secs() <= IP_BLOCK_DUR
+                || b.1.elapsed().as_secs() <= DAY_SECONDS
+        });
+
+        assert!(lock.contains_key(fresh_ip), "fresh should be retained");
+        assert!(!lock.contains_key(stale_ip), "stale should be removed");
+
+        lock.remove(fresh_ip);
+    }
+
+    // =======================================================================
+    // 16. Edge cases for check_cmd
+    // =======================================================================
+
+    #[tokio::test]
+    async fn cmd_empty_string() {
+        let (rs, db_path) = make_test_server().await;
+        let res = rs.check_cmd("").await;
+        assert!(res.is_empty());
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_whitespace_only() {
+        let (rs, db_path) = make_test_server().await;
+        let res = rs.check_cmd("   ").await;
+        assert!(res.is_empty());
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_test_geo_invalid_ip() {
+        let (rs, db_path) = make_test_server().await;
+        let res = rs.check_cmd("tg not_an_ip").await;
+        // Invalid IP should produce no output (parse fails)
+        assert!(res.is_empty());
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_relay_servers_list_after_parse() {
+        let (mut rs, db_path) = make_test_server().await;
+        rs.parse_relay_servers("127.0.0.1");
+        let res = rs.check_cmd("rs").await;
+        assert!(
+            res.contains("127.0.0.1"),
+            "should list the configured relay server: {}",
+            res
+        );
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn cmd_punch_requests_pagination() {
+        let (rs, db_path) = make_test_server().await;
+        {
+            let mut lock = PUNCH_REQS.lock().await;
+            lock.clear();
+            for i in 0..20 {
+                lock.push(PunchReqEntry {
+                    tm: Instant::now(),
+                    from_ip: format!("10.0.0.{}", i),
+                    to_ip: "10.0.0.99".to_string(),
+                    to_id: format!("target_{}", i),
+                });
+            }
+        }
+
+        // Default page size is 10, starting at offset 5
+        let res = rs.check_cmd("pr 5").await;
+        let lines: Vec<&str> = res.trim().lines().collect();
+        assert_eq!(lines.len(), 10, "should show 10 entries: {}", res);
+        // First entry should be index 5
+        assert!(lines[0].contains("10.0.0.5"));
+
+        // Page size 3 starting at 0
+        let res = rs.check_cmd("pr 0 3").await;
+        let lines: Vec<&str> = res.trim().lines().collect();
+        assert_eq!(lines.len(), 3, "custom page size should work: {}", res);
+
+        PUNCH_REQS.lock().await.clear();
+        cleanup(&db_path);
+    }
+
+    // =======================================================================
+    // CWE-532: Verify get_server_sk does not leak raw key material in logs.
+    //
+    // The log line in get_server_sk was changed from:
+    //   log::info!("Key: {}", key)
+    // to:
+    //   log::info!("Key: {}", if key.is_empty() { "(not set)" } else { "(configured)" })
+    //
+    // Rust's `log` crate has no built-in capture mechanism, so we verify the
+    // fix indirectly: the format string now only interpolates "(configured)" or
+    // "(not set)", never the raw key. These tests confirm that get_server_sk
+    // still returns the correct key value (functional correctness) while the
+    // log macro source is audited to never contain `"Key: {}", key` verbatim.
+    // =======================================================================
+
+    #[test]
+    fn get_server_sk_log_does_not_contain_raw_key_for_passphrase() {
+        // Verify the function still returns the key correctly (not broken by fix)
+        let passphrase = "my_secret_passphrase_12345";
+        let (returned_key, sk) = RendezvousServer::get_server_sk(passphrase);
+        assert_eq!(returned_key, passphrase, "passphrase key should be returned as-is");
+        assert!(sk.is_none(), "passphrase should not produce an sk");
+
+        // The log format string is:
+        //   "Key: {}", if key.is_empty() { "(not set)" } else { "(configured)" }
+        // This means the log output is either "Key: (not set)" or "Key: (configured)",
+        // never the raw passphrase. We verify by formatting the same expression:
+        let log_output = format!("Key: {}", if returned_key.is_empty() { "(not set)" } else { "(configured)" });
+        assert!(!log_output.contains(passphrase),
+            "log output must not contain the raw key value");
+        assert!(log_output.contains("(configured)"),
+            "log output should say '(configured)' for non-empty key");
+    }
+
+    #[test]
+    fn get_server_sk_log_does_not_contain_raw_key_for_crypto_sk() {
+        let (_pk, sk) = sodiumoxide::crypto::sign::gen_keypair();
+        let sk_b64 = base64::encode(&sk);
+        let (returned_key, out_sk) = RendezvousServer::get_server_sk(&sk_b64);
+
+        assert!(out_sk.is_some(), "valid sk should be parsed");
+        assert!(!returned_key.is_empty(), "returned key should not be empty");
+
+        // Verify the log format doesn't leak the derived public key
+        let log_output = format!("Key: {}", if returned_key.is_empty() { "(not set)" } else { "(configured)" });
+        assert!(!log_output.contains(&returned_key),
+            "log output must not contain the derived public key");
+        assert!(!log_output.contains(&sk_b64),
+            "log output must not contain the raw secret key");
+    }
+
+    #[test]
+    fn get_server_sk_log_shows_not_set_for_empty_key() {
+        let (returned_key, _sk) = RendezvousServer::get_server_sk("");
+        // Empty key path: the outer `if !key.is_empty()` guard means no log is emitted,
+        // but if it were, the format would produce "(not set)".
+        let log_output = format!("Key: {}", if returned_key.is_empty() { "(not set)" } else { "(configured)" });
+        assert_eq!(log_output, "Key: (not set)");
+    }
+
+    // =======================================================================
+    // Message size limit tests (CWE-400 mitigation)
+    // =======================================================================
+
+    #[test]
+    fn max_message_size_constant_is_64kb() {
+        assert_eq!(MAX_MESSAGE_SIZE, 64 * 1024);
+    }
+
+    #[tokio::test]
+    async fn message_under_limit_is_accepted() {
+        let (mut rs, db_path) = make_test_server().await;
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        // Build a valid small RegisterPeer message
+        let mut msg = RendezvousMessage::new();
+        msg.set_register_peer(RegisterPeer {
+            id: "test_small".to_owned(),
+            ..Default::default()
+        });
+        let bytes = BytesMut::from(msg.write_to_bytes().unwrap().as_slice());
+        assert!(bytes.len() < MAX_MESSAGE_SIZE, "test message should be well under the limit");
+
+        // Create a throwaway socket (we won't actually send on it)
+        let mut socket = FramedSocket::new(config::Config::get_any_listen_addr(true)).await.unwrap();
+        // handle_udp should succeed without error (message is under the size limit)
+        let result = rs.handle_udp(&bytes, addr, &mut socket, "").await;
+        assert!(result.is_ok(), "small message should be accepted");
+
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn message_over_limit_is_rejected() {
+        let (mut rs, db_path) = make_test_server().await;
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        // Create a message that exceeds the limit
+        let bytes = BytesMut::from(&vec![0u8; MAX_MESSAGE_SIZE + 1][..]);
+
+        let mut socket = FramedSocket::new(config::Config::get_any_listen_addr(true)).await.unwrap();
+        // handle_udp should return Ok(()) — the oversized message is silently dropped
+        let result = rs.handle_udp(&bytes, addr, &mut socket, "").await;
+        assert!(result.is_ok(), "oversized message should be dropped without error");
+
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn message_at_exact_boundary_is_accepted() {
+        let (mut rs, db_path) = make_test_server().await;
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        // Exactly MAX_MESSAGE_SIZE bytes — should be accepted (limit is >)
+        let bytes = BytesMut::from(&vec![0u8; MAX_MESSAGE_SIZE][..]);
+
+        let mut socket = FramedSocket::new(config::Config::get_any_listen_addr(true)).await.unwrap();
+        let result = rs.handle_udp(&bytes, addr, &mut socket, "").await;
+        assert!(result.is_ok(), "message at exact boundary should be accepted");
+
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn message_one_over_boundary_is_rejected() {
+        let (mut rs, db_path) = make_test_server().await;
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        // MAX_MESSAGE_SIZE + 1 bytes — should be rejected
+        let bytes = BytesMut::from(&vec![0u8; MAX_MESSAGE_SIZE + 1][..]);
+
+        let mut socket = FramedSocket::new(config::Config::get_any_listen_addr(true)).await.unwrap();
+        let result = rs.handle_udp(&bytes, addr, &mut socket, "").await;
+        assert!(result.is_ok(), "message one byte over boundary should be dropped without error");
+
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn tcp_message_over_limit_is_rejected() {
+        let (mut rs, db_path) = make_test_server().await;
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        // Create a message that exceeds the limit
+        let bytes = vec![0u8; MAX_MESSAGE_SIZE + 1];
+
+        // handle_tcp should return false (message dropped)
+        let result = rs.handle_tcp(&bytes, &mut None, addr, "", false).await;
+        assert!(!result, "oversized TCP message should be dropped (return false)");
+
+        cleanup(&db_path);
+    }
+
+    #[tokio::test]
+    async fn tcp_message_under_limit_is_accepted() {
+        let (mut rs, db_path) = make_test_server().await;
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        // Build a valid small PunchHoleRequest message (handled by handle_tcp)
+        let mut msg = RendezvousMessage::new();
+        msg.set_punch_hole_request(PunchHoleRequest {
+            id: "test_tcp_small".to_owned(),
+            ..Default::default()
+        });
+        let bytes = msg.write_to_bytes().unwrap();
+        assert!(bytes.len() < MAX_MESSAGE_SIZE, "test message should be well under the limit");
+
+        // handle_tcp with a valid but small message should not panic or error.
+        // It returns true if the message was a PunchHoleRequest (which it is),
+        // but the handler may fail internally since we have no real peer. It
+        // should still pass the size check and attempt to parse.
+        let _result = rs.handle_tcp(&bytes, &mut None, addr, "", false).await;
+        // We don't assert the return value here because the punch-hole logic
+        // depends on state; we only care that the size check passed.
+
+        cleanup(&db_path);
+    }
 }

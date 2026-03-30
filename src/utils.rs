@@ -168,3 +168,163 @@ fn main() {
         _ => print_help(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sodiumoxide::crypto::sign;
+
+    // --- gen_keypair / keypair generation ---
+
+    #[test]
+    fn test_gen_keypair_produces_valid_ed25519_keys() {
+        let (pk, sk) = sign::gen_keypair();
+        let pk_b64 = base64::encode(pk);
+        let sk_b64 = base64::encode(&sk);
+
+        // Both should be valid base64 that decodes to the right lengths
+        let pk_bytes = base64::decode(&pk_b64).unwrap();
+        let sk_bytes = base64::decode(&sk_b64).unwrap();
+        assert_eq!(pk_bytes.len(), sign::PUBLICKEYBYTES);
+        assert_eq!(sk_bytes.len(), sign::SECRETKEYBYTES);
+    }
+
+    #[test]
+    fn test_gen_keypair_public_key_derivable_from_secret_key() {
+        // Ed25519 secret key is seed||pk, so the public key is the second half
+        let (pk, sk) = sign::gen_keypair();
+        let derived_pk = &sk[sign::SECRETKEYBYTES / 2..];
+        assert_eq!(derived_pk, &pk[..]);
+    }
+
+    #[test]
+    fn test_gen_keypair_can_sign_and_verify() {
+        let (pk, sk) = sign::gen_keypair();
+        let message = b"test message for signing";
+        let signed = sign::sign(message, &sk);
+        let verified = sign::verify(&signed, &pk);
+        assert!(verified.is_ok());
+        assert_eq!(&verified.unwrap()[..], &message[..]);
+    }
+
+    // --- validate_keypair ---
+
+    #[test]
+    fn test_validate_keypair_valid_pair() {
+        let (pk, sk) = sign::gen_keypair();
+        let pk_b64 = base64::encode(pk);
+        let sk_b64 = base64::encode(&sk);
+        let result = validate_keypair(&pk_b64, &sk_b64);
+        assert!(result.is_ok(), "valid keypair should validate: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_validate_keypair_mismatched_keys() {
+        let (_pk1, sk1) = sign::gen_keypair();
+        let (pk2, _sk2) = sign::gen_keypair();
+        let pk_b64 = base64::encode(pk2);
+        let sk_b64 = base64::encode(&sk1);
+        let result = validate_keypair(&pk_b64, &sk_b64);
+        assert!(result.is_err(), "mismatched keypair should fail validation");
+    }
+
+    #[test]
+    fn test_validate_keypair_invalid_base64_sk() {
+        let result = validate_keypair("AAAA", "not valid base64!!!");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Invalid secret key") || err_msg.contains("Invalid"),
+            "error should mention invalid secret key, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_validate_keypair_invalid_base64_pk() {
+        let (_pk, sk) = sign::gen_keypair();
+        let sk_b64 = base64::encode(&sk);
+        let result = validate_keypair("not valid base64!!!", &sk_b64);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Invalid public key") || err_msg.contains("Invalid"),
+            "error should mention invalid public key, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_validate_keypair_wrong_length_sk() {
+        // Valid base64 but wrong byte length for a secret key
+        let short_sk = base64::encode(&[0u8; 16]);
+        let (pk, _sk) = sign::gen_keypair();
+        let pk_b64 = base64::encode(pk);
+        let result = validate_keypair(&pk_b64, &short_sk);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_keypair_wrong_length_pk() {
+        // Valid base64 but wrong byte length for a public key
+        let short_pk = base64::encode(&[0u8; 16]);
+        let (_pk, sk) = sign::gen_keypair();
+        let sk_b64 = base64::encode(&sk);
+        let result = validate_keypair(&short_pk, &sk_b64);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_keypair_empty_strings() {
+        let result = validate_keypair("", "");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_keypair_multiple_generated_pairs() {
+        // Generate several keypairs and confirm they all validate
+        for _ in 0..10 {
+            let (pk, sk) = sign::gen_keypair();
+            let pk_b64 = base64::encode(pk);
+            let sk_b64 = base64::encode(&sk);
+            assert!(
+                validate_keypair(&pk_b64, &sk_b64).is_ok(),
+                "freshly generated keypair should always validate"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_keypair_swapped_pk_sk() {
+        // Swapping public and secret key args should fail
+        let (pk, sk) = sign::gen_keypair();
+        let pk_b64 = base64::encode(pk);
+        let sk_b64 = base64::encode(&sk);
+        let result = validate_keypair(&sk_b64, &pk_b64);
+        assert!(result.is_err(), "swapped pk/sk should fail validation");
+    }
+
+    #[test]
+    fn test_validate_keypair_corrupted_sk() {
+        // Take a valid keypair, flip a byte in the secret key
+        let (pk, sk) = sign::gen_keypair();
+        let pk_b64 = base64::encode(pk);
+        let mut sk_bytes = sk[..].to_vec();
+        sk_bytes[0] ^= 0xFF; // corrupt first byte
+        let sk_b64 = base64::encode(&sk_bytes);
+        let result = validate_keypair(&pk_b64, &sk_b64);
+        assert!(result.is_err(), "corrupted secret key should fail validation");
+    }
+
+    #[test]
+    fn test_validate_keypair_corrupted_pk() {
+        // Take a valid keypair, flip a byte in the public key
+        let (pk, sk) = sign::gen_keypair();
+        let mut pk_bytes = pk[..].to_vec();
+        pk_bytes[0] ^= 0xFF; // corrupt first byte
+        let pk_b64 = base64::encode(&pk_bytes);
+        let sk_b64 = base64::encode(&sk);
+        let result = validate_keypair(&pk_b64, &sk_b64);
+        assert!(result.is_err(), "corrupted public key should fail validation");
+    }
+}
