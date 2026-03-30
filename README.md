@@ -1,35 +1,75 @@
-# RustDesk Server Program
+# SteelDesk Server
 
-[![build](https://github.com/rustdesk/rustdesk-server/actions/workflows/build.yaml/badge.svg)](https://github.com/rustdesk/rustdesk-server/actions/workflows/build.yaml)
+Server infrastructure for [SteelDesk](https://github.com/ThePoliceRecord/steeldesk) remote desktop. Includes rendezvous server, relay server, Pro API with web console, and CLI management tool.
 
-[**Download**](https://github.com/rustdesk/rustdesk-server/releases)
+## What's Included
 
-[**Manual**](https://rustdesk.com/docs/en/self-host/)
+- **Rendezvous Server** (`steeldesk-server`) — peer discovery, NAT hole-punching, relay assignment
+- **Relay Server** (`hbbr`) — traffic relay when direct P2P fails
+- **Pro API** (port 21114) — 46 endpoints for enterprise management
+- **Web Console** — React SPA at `/console/index.html`
+- **CLI Tool** (`steeldesk-api-cli`) — 16 management commands
 
-[**FAQ**](https://github.com/rustdesk/rustdesk/wiki/FAQ)
+## Pro API (46 Endpoints)
 
-[**How to migrate OSS to Pro**](https://rustdesk.com/docs/en/self-host/rustdesk-server-pro/installscript/#convert-from-open-source)
+| Feature | What |
+|---|---|
+| Authentication | JWT login, token validation |
+| Heartbeat | `is_pro: true` — unlocks all client Pro UI |
+| User Management | CRUD with bcrypt passwords |
+| RBAC | Admin/Operator/Viewer roles, custom roles |
+| Groups | User groups + device groups with membership |
+| Strategies | Policy engine with assignment and group inheritance |
+| Control Roles | 8 session-level permissions |
+| Address Book | Per-user with tags |
+| Audit Logs | Connection and file transfer audit |
 
-Self-host your own RustDesk server, it is free and open source.
+## Security Fixes
 
-## How to build manually
+- Crypto keys no longer logged at INFO level
+- Relay warns without `-k` auth key
+- Key files created with 0o600 permissions
+- X-Forwarded-For only from configured trusted proxies
+- Protobuf messages limited to 64KB
+
+## Quick Start
 
 ```bash
-cargo build --release
+nix develop
+git submodule update --init --recursive
+cargo build
+
+# Run
+cargo run --bin steeldesk-server -- -k mykey
+cargo run --bin hbbr -- -k mykey
+
+# Web console: http://localhost:21114/console/index.html
+# Default login: admin / admin123
+
+# CLI
+cargo run --bin steeldesk-api-cli -- login admin admin123
+cargo run --bin steeldesk-api-cli -- user list
 ```
 
-Three executables will be generated in target/release.
+## Port Map
 
-- hbbs - RustDesk ID/Rendezvous server
-- hbbr - RustDesk relay server
-- rustdesk-utils - RustDesk CLI utilities
+| Port | Binary | Purpose |
+|---|---|---|
+| 21114 | steeldesk-server | **Pro API + Web Console** |
+| 21115 | steeldesk-server | NAT type detection |
+| 21116 | steeldesk-server | Peer registration |
+| 21117 | hbbr | Relay |
+| 21118 | steeldesk-server | WebSocket rendezvous |
+| 21119 | hbbr | WebSocket relay |
 
-You can find updated binaries on the [Releases](https://github.com/rustdesk/rustdesk-server/releases) page.
+## Testing
 
-If you want extra features, [RustDesk Server Pro](https://rustdesk.com/pricing.html) might suit you better.
+**332 tests**, all passing.
 
-If you want to develop your own server, [rustdesk-server-demo](https://github.com/rustdesk/rustdesk-server-demo) might be a better and simpler start for you than this repo.
+```bash
+nix develop --command bash -c 'unset SQLX_OFFLINE && export DATABASE_URL="sqlite:db_v2.sqlite3" && cargo test --lib'
+```
 
-## Installation
+## License
 
-Please follow this [doc](https://rustdesk.com/docs/en/self-host/rustdesk-server-oss/)
+AGPL-3.0 — same as upstream RustDesk.
