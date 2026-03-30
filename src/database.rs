@@ -159,12 +159,38 @@ pub struct UserControlRoleRow {
     pub control_role_id: String,
 }
 
+/// Row type for the `recordings` table.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RecordingRow {
+    pub id: String,
+    pub connection_id: String,
+    pub from_peer: String,
+    pub to_peer: String,
+    pub file_name: String,
+    pub file_size: i64,
+    pub duration_seconds: i64,
+    pub uploaded_at: String,
+}
+
 /// Row type for the `strategy_assignments` table.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct StrategyAssignmentRow {
     pub strategy_id: String,
     pub target_type: String,
     pub target_id: String,
+}
+
+/// Row type for the `oidc_providers` table.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct OidcProviderRow {
+    pub id: String,
+    pub name: String,
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub scopes: String,
+    pub enabled: i32,
+    pub created_at: String,
 }
 
 impl Database {
@@ -379,6 +405,56 @@ impl Database {
                 FOREIGN KEY (user_id) REFERENCES users(id),
                 FOREIGN KEY (control_role_id) REFERENCES control_roles(id)
             )"
+        )
+        .execute(self.pool.get().await?.deref_mut())
+        .await?;
+
+        // OIDC / SSO provider table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS oidc_providers (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                issuer_url TEXT NOT NULL,
+                client_id TEXT NOT NULL,
+                client_secret TEXT NOT NULL,
+                scopes TEXT NOT NULL DEFAULT 'openid profile email',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"
+        )
+        .execute(self.pool.get().await?.deref_mut())
+        .await?;
+
+        // Recordings table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS recordings (
+                id TEXT PRIMARY KEY NOT NULL,
+                connection_id TEXT NOT NULL DEFAULT '',
+                from_peer TEXT NOT NULL DEFAULT '',
+                to_peer TEXT NOT NULL DEFAULT '',
+                file_name TEXT NOT NULL,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                duration_seconds INTEGER NOT NULL DEFAULT 0,
+                uploaded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"
+        )
+        .execute(self.pool.get().await?.deref_mut())
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_recordings_from_peer ON recordings(from_peer)"
+        )
+        .execute(self.pool.get().await?.deref_mut())
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_recordings_to_peer ON recordings(to_peer)"
+        )
+        .execute(self.pool.get().await?.deref_mut())
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_recordings_uploaded_at ON recordings(uploaded_at)"
         )
         .execute(self.pool.get().await?.deref_mut())
         .await?;
@@ -1267,6 +1343,174 @@ impl Database {
         .execute(self.pool.get().await?.deref_mut())
         .await?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // OIDC provider queries
+    // -----------------------------------------------------------------------
+
+    pub async fn insert_oidc_provider(
+        &self,
+        id: &str,
+        name: &str,
+        issuer_url: &str,
+        client_id: &str,
+        client_secret: &str,
+        scopes: &str,
+    ) -> ResultType<()> {
+        sqlx::query(
+            "INSERT INTO oidc_providers (id, name, issuer_url, client_id, client_secret, scopes) VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        .bind(id)
+        .bind(name)
+        .bind(issuer_url)
+        .bind(client_id)
+        .bind(client_secret)
+        .bind(scopes)
+        .execute(self.pool.get().await?.deref_mut())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_oidc_providers(&self) -> ResultType<Vec<OidcProviderRow>> {
+        let rows = sqlx::query_as::<_, OidcProviderRow>(
+            "SELECT id, name, issuer_url, client_id, client_secret, scopes, enabled, created_at FROM oidc_providers ORDER BY created_at ASC"
+        )
+        .fetch_all(self.pool.get().await?.deref_mut())
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn get_oidc_provider(&self, id: &str) -> ResultType<Option<OidcProviderRow>> {
+        let row = sqlx::query_as::<_, OidcProviderRow>(
+            "SELECT id, name, issuer_url, client_id, client_secret, scopes, enabled, created_at FROM oidc_providers WHERE id = ?"
+        )
+        .bind(id)
+        .fetch_optional(self.pool.get().await?.deref_mut())
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn delete_oidc_provider(&self, id: &str) -> ResultType<bool> {
+        let result = sqlx::query("DELETE FROM oidc_providers WHERE id = ?")
+            .bind(id)
+            .execute(self.pool.get().await?.deref_mut())
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional user queries for OIDC
+    // -----------------------------------------------------------------------
+
+    pub async fn get_user_by_email(&self, email: &str) -> ResultType<Option<UserRow>> {
+        let row = sqlx::query_as::<_, UserRow>(
+            "SELECT id, username, email, password_hash, is_admin FROM users WHERE email = ?"
+        )
+        .bind(email)
+        .fetch_optional(self.pool.get().await?.deref_mut())
+        .await?;
+        Ok(row)
+    }
+
+    // -----------------------------------------------------------------------
+    // Recording queries (Pro API)
+    // -----------------------------------------------------------------------
+
+    pub async fn insert_recording(
+        &self,
+        id: &str,
+        connection_id: &str,
+        from_peer: &str,
+        to_peer: &str,
+        file_name: &str,
+        file_size: i64,
+        duration_seconds: i64,
+    ) -> ResultType<RecordingRow> {
+        sqlx::query(
+            "INSERT INTO recordings (id, connection_id, from_peer, to_peer, file_name, file_size, duration_seconds) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(id)
+        .bind(connection_id)
+        .bind(from_peer)
+        .bind(to_peer)
+        .bind(file_name)
+        .bind(file_size)
+        .bind(duration_seconds)
+        .execute(self.pool.get().await?.deref_mut())
+        .await?;
+
+        let row = sqlx::query_as::<_, RecordingRow>(
+            "SELECT id, connection_id, from_peer, to_peer, file_name, file_size, duration_seconds, uploaded_at FROM recordings WHERE id = ?"
+        )
+        .bind(id)
+        .fetch_one(self.pool.get().await?.deref_mut())
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_recording(&self, id: &str) -> ResultType<Option<RecordingRow>> {
+        let row = sqlx::query_as::<_, RecordingRow>(
+            "SELECT id, connection_id, from_peer, to_peer, file_name, file_size, duration_seconds, uploaded_at FROM recordings WHERE id = ?"
+        )
+        .bind(id)
+        .fetch_optional(self.pool.get().await?.deref_mut())
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_recordings(
+        &self,
+        from_peer: Option<&str>,
+        to_peer: Option<&str>,
+        connection_id: Option<&str>,
+    ) -> ResultType<Vec<RecordingRow>> {
+        let mut sql = String::from(
+            "SELECT id, connection_id, from_peer, to_peer, file_name, file_size, duration_seconds, uploaded_at FROM recordings WHERE 1=1"
+        );
+        let mut binds: Vec<String> = Vec::new();
+
+        if let Some(fp) = from_peer {
+            sql.push_str(" AND from_peer = ?");
+            binds.push(fp.to_string());
+        }
+        if let Some(tp) = to_peer {
+            sql.push_str(" AND to_peer = ?");
+            binds.push(tp.to_string());
+        }
+        if let Some(cid) = connection_id {
+            sql.push_str(" AND connection_id = ?");
+            binds.push(cid.to_string());
+        }
+        sql.push_str(" ORDER BY uploaded_at DESC");
+
+        let mut q = sqlx::query_as::<_, RecordingRow>(&sql);
+        for b in &binds {
+            q = q.bind(b);
+        }
+        let rows = q.fetch_all(self.pool.get().await?.deref_mut()).await?;
+        Ok(rows)
+    }
+
+    pub async fn delete_recording(&self, id: &str) -> ResultType<bool> {
+        let result = sqlx::query("DELETE FROM recordings WHERE id = ?")
+            .bind(id)
+            .execute(self.pool.get().await?.deref_mut())
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// List recordings older than `days` days.
+    pub async fn list_recordings_older_than(&self, days: u32) -> ResultType<Vec<RecordingRow>> {
+        let rows = sqlx::query_as::<_, RecordingRow>(
+            "SELECT id, connection_id, from_peer, to_peer, file_name, file_size, duration_seconds, uploaded_at
+             FROM recordings
+             WHERE uploaded_at < datetime('now', '-' || ? || ' days')"
+        )
+        .bind(days)
+        .fetch_all(self.pool.get().await?.deref_mut())
+        .await?;
+        Ok(rows)
     }
 }
 

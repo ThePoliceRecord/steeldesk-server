@@ -4,6 +4,8 @@ pub mod auth;
 pub mod control_roles;
 pub mod groups;
 pub mod heartbeat;
+pub mod oidc;
+pub mod recordings;
 pub mod roles;
 pub mod strategies;
 pub mod users;
@@ -223,6 +225,17 @@ pub async fn build_router(db: Database) -> Router {
         // Audit
         .route("/api/audit/conn", post(audit::post_conn_audit).get(audit::get_conn_audit))
         .route("/api/audit/file", post(audit::post_file_audit))
+        // Recordings
+        .route("/api/recordings/upload", post(recordings::upload_recording))
+        .route("/api/recordings", get(recordings::list_recordings))
+        .route(
+            "/api/recordings/:id",
+            get(recordings::get_recording).delete(recordings::delete_recording),
+        )
+        .route(
+            "/api/recordings/:id/download",
+            get(recordings::download_recording),
+        )
         // User groups
         .route(
             "/api/user-groups",
@@ -312,7 +325,19 @@ pub async fn build_router(db: Database) -> Router {
                 },
             ),
         )
+        // OIDC / SSO
+        .route(
+            "/api/oidc/providers",
+            get(oidc::list_providers).post(oidc::create_provider),
+        )
+        .route(
+            "/api/oidc/providers/:id",
+            delete(oidc::delete_provider),
+        )
+        .route("/api/oidc/authorize/:provider_id", get(oidc::authorize))
+        .route("/api/oidc/callback", get(oidc::callback))
         // Shared state
+        .layer(Extension(oidc::OidcStateStore::new()))
         .layer(Extension(db))
         // Middleware
         .layer(cors)
